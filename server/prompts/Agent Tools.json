@@ -1,0 +1,104 @@
+{
+  "tools": [
+    {
+      "name": "GrepRepo",
+      "description": "Searches for regex patterns within file contents across the repository. Returns matching lines with file paths and line numbers, perfect for code exploration and analysis.\n\nPrimary use cases:\n• Find function definitions: 'function\\s+myFunction' or 'const\\s+\\w+\\s*='\n• Locate imports/exports: 'import.*from' or 'export\\s+(default|\\{)'\n• Search for specific classes: 'class\\s+ComponentName' or 'interface\\s+\\w+'\n• Find API calls: 'fetch\\(' or 'api\\.(get|post)'\n• Discover configuration: 'process\\.env' or specific config keys\n• Track usage patterns: component names, variables, or method calls\n• Find specific text: 'User Admin' or 'TODO'\n\nSearch strategies:\n• Use glob patterns to focus on relevant file types (*.ts, *.jsx, src/**)\n• Combine with path filtering for specific directories\n• Start broad, then narrow down with more specific patterns\n• Remember: case-insensitive matching, max 200 results returned",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "The regular expression (regex) pattern to search for within file contents (e.g., 'function\\s+myFunction', 'import\\s+\\{.*\\}\\s+from\\s+.*')."
+          },
+          "path": {
+            "type": "string",
+            "description": "Optional: The absolute path to the directory to search within. If omitted, searches all the files."
+          },
+          "globPattern": {
+            "type": "string",
+            "description": "Optional: A glob pattern to filter which files are searched (e.g., '*.js', '*.{ts,tsx}', 'src/**'). If omitted, searches all files (respecting potential global ignores)."
+          },
+          "taskNameActive": {
+            "type": "string",
+            "description": "2-5 words describing the task when it is running. Will be shown in the UI. For example, \"Finding exports\"."
+          },
+          "taskNameComplete": {
+            "type": "string",
+            "description": "2-5 words describing the task when it is complete. Will be shown in the UI. It should not signal success or failure, just that the task is done. For example, \"Found exports\"."
+          }
+        },
+        "required": ["pattern", "taskNameActive", "taskNameComplete"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "LSRepo",
+      "description": "Lists files and directories in the repository. Returns file paths sorted alphabetically with optional pattern-based filtering.\n\nCommon use cases:\n• Explore repository structure and understand project layout\n• Find files in specific directories (e.g., 'src/', 'components/')\n• Locate configuration files, documentation, or specific file types\n• Get overview of available files before diving into specific areas\n\nTips:\n• Use specific paths to narrow down results (max 200 entries returned)\n• Combine with ignore patterns to exclude irrelevant files\n• Start with root directory to get project overview, then drill down",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The absolute path to the directory to list (must be absolute, not relative). Use \".\" for project root."
+          },
+          "globPattern": {
+            "type": "string",
+            "description": "Optional: A glob pattern to filter which files are listed (e.g., '*.js', '*.{ts,tsx}', 'src/**'). If omitted, lists all files."
+          },
+          "ignore": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional: List of glob patterns to ignore"
+          },
+          "taskNameActive": {
+            "type": "string",
+            "description": "2-5 words describing the task when it is running. Will be shown in the UI. For example, \"Listing files\"."
+          },
+          "taskNameComplete": {
+            "type": "string",
+            "description": "2-5 words describing the task when it is complete. Will be shown in the UI. It should not signal success or failure, just that the task is done. For example, \"Listed files\"."
+          }
+        },
+        "required": ["path", "taskNameActive", "taskNameComplete"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ReadFile",
+      "description": "Reads file contents intelligently - returns complete files when small, paginated chunks, or targeted chunks when large based on your query.\n\n**How it works:**\n• **Small files** (≤2000 lines) - Returns complete content\n• **Large files** (>2000 lines) - Uses AI to find and return relevant chunks based on query\n• **Binary files** - Returns images, handles blob content appropriately\n• Any lines longer than 2000 characters are truncated for readability\n• Start line and end line can be provided to read specific sections of a file\n\n**When to use:**\n• **Before editing** - Always read files before making changes\n• **Understanding implementation** - How specific features or functions work\n• **Finding specific code** - Locate patterns, functions, or configurations in large files\n• **Code analysis** - Understand structure, dependencies, or patterns\n\n**Query strategy:**\nBy default, you should avoid queries or pagination so you can collect the full context.\nIf you get a warning saying the file is too big, then you should be specific about what you're looking for - the more targeted your query, the better the relevant chunks returned.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "filePath": {
+            "type": "string",
+            "description": "The absolute path to the file to read (e.g., 'src/App.tsx', 'package.json'). Relative paths are not supported. You must provide an absolute path."
+          },
+          "query": {
+            "type": "string",
+            "description": "Optional: What you're looking for in the file. Required for large files (>2000 lines), optional for smaller files.\n\n**Query types:**\n• **Function/hook usage** - \"How is useAuth used?\" or \"Find all API calls\"\n• **Implementation details** - \"Authentication logic\" or \"error handling patterns\"\n• **Specific features** - \"Form validation\" or \"database queries\"\n• **Code patterns** - \"React components\" or \"TypeScript interfaces\"\n• **Configuration** - \"Environment variables\" or \"routing setup\"\n\n**Examples:**\n• \"Show me the error handling implementation\"\n• \"Locate form validation logic\""
+          },
+          "startLine": {
+            "type": "number",
+            "description": "Optional: Starting line number (1-based). Use grep results or estimated locations to target specific code sections."
+          },
+          "endLine": {
+            "type": "number",
+            "description": "Optional: Ending line number (1-based). Include enough lines to capture complete functions, classes, or logical code blocks."
+          },
+          "taskNameActive": {
+            "type": "string",
+            "description": "2-5 words describing the task when it is running. Will be shown in the UI. For example, \"Reading App\"."
+          },
+          "taskNameComplete": {
+            "type": "string",
+            "description": "2-5 words describing the task when it is complete. Will be shown in the UI. It should not signal success or failure, just that the task is done. For example, \"Read App\"."
+          }
+        },
+        "required": ["filePath", "taskNameActive", "taskNameComplete"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
