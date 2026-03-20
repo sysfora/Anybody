@@ -1,10 +1,10 @@
 'use client';
 
 import { use } from 'react';
-import Chat from '../page';
+import ChatView from '../chat-view';
 
 export default function ChatProjectPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
-  return <Chat projectIdFromUrl={projectId} />;
+  return <ChatView projectIdFromUrl={projectId} />;
 }
 

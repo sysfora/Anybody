@@ -1,15 +1,28 @@
 "use client"
 
+import { useEffect, useState } from "react"
+import { useTheme } from "next-themes"
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { oneLight, vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
 interface CodeHighlightProps {
     code: string
     language: string
+    /** Lock to dark syntax colors (e.g. dark panel). Default follows app theme. */
+    variant?: 'default' | 'dark'
 }
 
-export function CodeHighlight({ code, language }: CodeHighlightProps) {
-    // Map common file extensions to Prism language identifiers
+export function CodeHighlight({ code, language, variant = 'default' }: CodeHighlightProps) {
+    const { resolvedTheme } = useTheme()
+    const [mounted, setMounted] = useState(false)
+    useEffect(() => setMounted(true), [])
+
+    const useDarkSyntax =
+        variant === 'dark' ||
+        (variant === 'default' && mounted && resolvedTheme === 'dark')
+
+    const prismStyle = useDarkSyntax ? vscDarkPlus : oneLight
+
     const getPrismLanguage = (lang: string): string => {
         const langMap: Record<string, string> = {
             'javascript': 'javascript',
@@ -41,10 +54,10 @@ export function CodeHighlight({ code, language }: CodeHighlightProps) {
     }
 
     return (
-        <div className="code-highlight-wrapper" style={{ width: '100%', boxSizing: 'border-box' }}>
+        <div className="code-highlight-wrapper w-full box-border">
             <SyntaxHighlighter
                 language={getPrismLanguage(language)}
-                style={vscDarkPlus}
+                style={prismStyle}
                 customStyle={{
                     margin: 0,
                     padding: 0,
@@ -60,7 +73,7 @@ export function CodeHighlight({ code, language }: CodeHighlightProps) {
                 lineNumberStyle={{
                     minWidth: '3em',
                     paddingRight: '1em',
-                    color: '#858585',
+                    color: useDarkSyntax ? '#858585' : '#a1a1aa',
                     userSelect: 'none',
                 }}
                 PreTag="div"
@@ -77,4 +90,3 @@ export function CodeHighlight({ code, language }: CodeHighlightProps) {
         </div>
     )
 }
-

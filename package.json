@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:ws": "cd server && python3 -m uvicorn ws_app:app --host 127.0.0.1 --port 5000 --reload",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"

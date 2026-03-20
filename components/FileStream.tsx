@@ -456,6 +456,7 @@ export default function FileStream({ filePath, fileName, content, step, isVisibl
               <CodeHighlight
                 code={displayContent}
                 language={getFileLanguage(fileName)}
+                variant="dark"
               />
               {isStreaming && (
                 <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1" />

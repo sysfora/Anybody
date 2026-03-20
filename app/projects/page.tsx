@@ -3,11 +3,8 @@
 import { Sidebar } from "@/components/Dashboard/Sidebar";
 import { NavigationBar } from "@/components/NavigationBar";
 import { ProjectsList } from "@/components/Dashboard/ProjectsList";
-import { useAuthRedirect } from "@/hooks/use-auth-redirect";
 
 export default function ProjectsPage() {
-  useAuthRedirect();
-
   return (
     <div className="min-h-screen">
       <NavigationBar variant="sidebar" />

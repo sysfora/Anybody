@@ -29,9 +29,11 @@ type NavigationBarVariant = 'default' | 'chat' | 'sidebar';
 
 interface NavigationBarProps {
   variant?: NavigationBarVariant;
+  /** When true (e.g. chat UI demo), deploy/download do not call the API. */
+  demoMode?: boolean;
 }
 
-export function NavigationBar({ variant = 'default' }: NavigationBarProps) {
+export function NavigationBar({ variant = 'default', demoMode = false }: NavigationBarProps) {
   const {
     projectName,
     userId,
@@ -474,9 +476,9 @@ export function NavigationBar({ variant = 'default' }: NavigationBarProps) {
               variant="default"
               size="sm"
               onClick={handleDeploy}
-              disabled={!hasProject || isWorking}
+              disabled={demoMode || !hasProject || isWorking}
               className="h-8 gap-1.5 px-3 flex items-center"
-              title="Deploy project"
+              title={demoMode ? 'Not available in demo' : 'Deploy project'}
             >
               <Rocket className="h-3.5 w-3.5" />
               <span className="hidden lg:inline text-xs">Deploy</span>
@@ -487,9 +489,9 @@ export function NavigationBar({ variant = 'default' }: NavigationBarProps) {
               variant="outline"
               size="sm"
               onClick={handleDownload}
-              disabled={!hasProject || isWorking || isDownloading}
+              disabled={demoMode || !hasProject || isWorking || isDownloading}
               className="h-8 gap-1.5 px-3 flex items-center"
-              title="Download project"
+              title={demoMode ? 'Not available in demo' : 'Download project'}
             >
               {isDownloading ? (
                 <>
