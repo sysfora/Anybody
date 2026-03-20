@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import pb from "@/lib/pocketbase";
 import { useAuthRedirect } from "@/hooks/use-auth-redirect";
+import { SUBSCRIPTION_RESUME_KEY, type SubscriptionResumeData } from "@/components/SubscriptionPopup";
 
 function SubscriptionSuccessContent() {
   useAuthRedirect();
@@ -17,6 +18,17 @@ function SubscriptionSuccessContent() {
   const [countdown, setCountdown] = useState(5);
   const [isUpdating, setIsUpdating] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [resumeData, setResumeData] = useState<SubscriptionResumeData | null>(null);
+
+  // Read the resume data saved before the user went to Stripe.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SUBSCRIPTION_RESUME_KEY);
+      if (raw) setResumeData(JSON.parse(raw) as SubscriptionResumeData);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   useEffect(() => {
     // If no session_id in URL, try to get it from recent sessions
@@ -106,7 +118,7 @@ function SubscriptionSuccessContent() {
     fetchSessionId();
   }, [sessionId, router, searchParams]);
 
-  // Countdown timer
+  // Countdown timer — redirect to the original page when done.
   useEffect(() => {
     if (!isUpdating && countdown > 0) {
       const timer = setTimeout(() => {
@@ -114,9 +126,10 @@ function SubscriptionSuccessContent() {
       }, 1000);
       return () => clearTimeout(timer);
     } else if (!isUpdating && countdown === 0) {
-      router.push("/subscription");
+      // resumeData stays in localStorage so the target page can restore the prompt.
+      router.push(resumeData?.returnTo ?? "/subscription");
     }
-  }, [countdown, isUpdating, router]);
+  }, [countdown, isUpdating, router, resumeData]);
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-background">
@@ -211,12 +224,17 @@ function SubscriptionSuccessContent() {
 
                 <div className="space-y-4">
                   <Button
-                    onClick={() => router.push("/subscription")}
+                    onClick={() => router.push(resumeData?.returnTo ?? "/subscription")}
                     className="w-full rounded-xl h-12 text-base font-medium"
                     size="lg"
                   >
-                    View Subscription
+                    {resumeData?.returnTo ? "Continue Building" : "View Subscription"}
                   </Button>
+                  {resumeData?.pendingPrompt && (
+                    <p className="text-center text-xs text-muted-foreground px-4">
+                      Your prompt <span className="font-medium text-foreground">&ldquo;{resumeData.pendingPrompt.slice(0, 60)}{resumeData.pendingPrompt.length > 60 ? '…' : ''}&rdquo;</span> will be waiting for you.
+                    </p>
+                  )}
                   <p className="text-center text-sm text-muted-foreground">
                     Redirecting automatically in {countdown} second{countdown !== 1 ? 's' : ''}...
                   </p>

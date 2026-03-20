@@ -31,6 +31,8 @@ import { cn } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
 import { getSocket } from '@/lib/socket';
 import pb from '@/lib/pocketbase';
+import { SUBSCRIPTION_RESUME_KEY, type SubscriptionResumeData } from '@/components/SubscriptionPopup';
+import { toast } from 'sonner';
 
 const deviceSizes = {
   mobile: '375px',
@@ -220,10 +222,32 @@ export default function ChatView({
     }
   }, [projectIdFromUrl, setProjectName, setStatus]);
 
-  // Capture a message submitted from the home page so we can auto-send it
-  // once the socket connects. Only relevant on a fresh /chat (no project URL).
+  // On mount, capture any pending message to auto-submit once the socket connects.
+  // Sources (checked in priority order):
+  //   1. localStorage subscription resume — user returned after subscribing
+  //   2. pendingSubmission context    — user navigated from the home page
+  // Only applies to a fresh /chat (no existing project in the URL).
   useEffect(() => {
     if (projectIdFromUrl?.trim()) return;
+
+    // 1. Subscription resume: user went through Stripe and came back to /chat
+    try {
+      const raw = localStorage.getItem(SUBSCRIPTION_RESUME_KEY);
+      if (raw) {
+        const data = JSON.parse(raw) as SubscriptionResumeData;
+        if (data.returnTo === '/chat' && data.pendingPrompt?.trim()) {
+          autoSubmitMessageRef.current = data.pendingPrompt.trim();
+          autoSubmitVisibilityRef.current =
+            (data.pendingVisibility as VisibilityOption) ?? 'public';
+          localStorage.removeItem(SUBSCRIPTION_RESUME_KEY);
+          return;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2. Normal home → chat navigation via context
     const msg = pendingSubmission.message?.trim();
     if (!msg) return;
     autoSubmitMessageRef.current = msg;
@@ -799,6 +823,33 @@ export default function ChatView({
           ? { project_id: pocketbaseProjectId }
           : {}),
       });
+
+      // Deduct credit and trigger auto-reload if needed (fire-and-forget)
+      void (async () => {
+        try {
+          const res = await fetch('/api/user/deduct-credit', { method: 'POST' });
+          if (!res.ok) return;
+          const data = (await res.json()) as {
+            creditsRemaining: number;
+            autoReloaded: boolean;
+            creditsAdded?: number;
+            autoReloadError?: string;
+            insufficientCredits: boolean;
+          };
+
+          if (data.autoReloaded && data.creditsAdded) {
+            toast.success(`Credits auto-reloaded — ${data.creditsAdded} credits added`);
+          } else if (data.autoReloadError) {
+            toast.warning(`Auto-reload failed: ${data.autoReloadError}`);
+          } else if (data.insufficientCredits) {
+            toast.warning('You are out of credits. Please top up to continue generating.');
+          } else if (data.creditsRemaining <= 100) {
+            toast.info(`${data.creditsRemaining} credit${data.creditsRemaining === 1 ? '' : 's'} remaining`);
+          }
+        } catch {
+          // silent — credit deduction failure should not disrupt the UX
+        }
+      })();
     } finally {
       submitInFlightRef.current = false;
     }

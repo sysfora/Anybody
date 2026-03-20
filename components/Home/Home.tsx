@@ -11,7 +11,7 @@ import { Navbar } from "@/components/Home/Navbar";
 import Footer from "@/components/Home/Footer";
 import Background from "@/components/Home/Background";
 import { VisibilityDropdown, type VisibilityOption } from "@/components/ui/visibility-dropdown";
-import { SubscriptionPopup } from "@/components/SubscriptionPopup";
+import { SubscriptionPopup, SUBSCRIPTION_RESUME_KEY, type SubscriptionResumeData } from "@/components/SubscriptionPopup";
 import { checkProjectLimit, canCreatePrivateProject } from "@/lib/subscription";
 import pb from "@/lib/pocketbase";
 import { useToast } from "@/hooks/use-toast";
@@ -32,6 +32,23 @@ export const Content = () => {
 
     useEffect(() => {
         setMounted(true);
+
+        // Restore prompt typed before the subscription popup interrupted the flow.
+        try {
+            const raw = localStorage.getItem(SUBSCRIPTION_RESUME_KEY);
+            if (raw) {
+                const data = JSON.parse(raw) as SubscriptionResumeData;
+                if (data.returnTo === '/') {
+                    if (data.pendingPrompt) setAppIdea(data.pendingPrompt);
+                    if (data.pendingVisibility === 'public' || data.pendingVisibility === 'private') {
+                        setVisibility(data.pendingVisibility);
+                    }
+                    localStorage.removeItem(SUBSCRIPTION_RESUME_KEY);
+                }
+            }
+        } catch {
+            // ignore
+        }
     }, []);
 
     useEffect(() => {
@@ -242,6 +259,9 @@ export const Content = () => {
                 open={showSubscriptionPopup}
                 onOpenChange={setShowSubscriptionPopup}
                 reason={subscriptionReason}
+                returnTo="/"
+                pendingPrompt={appIdea}
+                pendingVisibility={visibility}
             />
         </section>
     );

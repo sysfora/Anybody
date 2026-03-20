@@ -28,13 +28,34 @@ const features = [
   "Team collaboration",
 ];
 
+export const SUBSCRIPTION_RESUME_KEY = "subscriptionResume";
+
+export interface SubscriptionResumeData {
+  returnTo: string;
+  pendingPrompt: string;
+  pendingVisibility: string;
+}
+
 interface SubscriptionPopupProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   reason?: "private_project" | "out_of_limits";
+  /** Page the user was on when the popup was triggered (e.g. "/" or "/chat"). */
+  returnTo?: string;
+  /** Text the user had typed before being interrupted. */
+  pendingPrompt?: string;
+  /** Visibility they had selected. */
+  pendingVisibility?: string;
 }
 
-export function SubscriptionPopup({ open, onOpenChange, reason }: SubscriptionPopupProps) {
+export function SubscriptionPopup({
+  open,
+  onOpenChange,
+  reason,
+  returnTo,
+  pendingPrompt,
+  pendingVisibility,
+}: SubscriptionPopupProps) {
   const [billingCycle, setBillingCycle] = useState<"monthly" | "yearly">("monthly");
   const [loading, setLoading] = useState(false);
 
@@ -64,6 +85,18 @@ export function SubscriptionPopup({ open, onOpenChange, reason }: SubscriptionPo
   const handleUpgrade = async () => {
     try {
       setLoading(true);
+
+      // Persist the user's context so we can restore it after Stripe returns.
+      const resumeData: SubscriptionResumeData = {
+        returnTo: returnTo ?? (typeof window !== "undefined" ? window.location.pathname : "/"),
+        pendingPrompt: pendingPrompt ?? "",
+        pendingVisibility: pendingVisibility ?? "public",
+      };
+      try {
+        localStorage.setItem(SUBSCRIPTION_RESUME_KEY, JSON.stringify(resumeData));
+      } catch {
+        // localStorage unavailable (e.g. private browsing) — proceed anyway
+      }
 
       const userEmail = pb.authStore.record?.email;
 
