@@ -117,7 +117,9 @@ export default function ChatView({
     projectIdFromUrlRef.current = projectIdFromUrl;
   }, [projectIdFromUrl]);
 
-  const [sessionAuthed, setSessionAuthed] = useState(pb.authStore.isValid);
+  // Must match server first paint (no PocketBase session in SSR) to avoid hydration mismatch.
+  const [sessionAuthed, setSessionAuthed] = useState(false);
+  const [authResolved, setAuthResolved] = useState(false);
 
   useEffect(() => {
     const syncUser = () => {
@@ -126,6 +128,7 @@ export default function ChatView({
       setUserId(model?.id ?? null);
     };
     syncUser();
+    setAuthResolved(true);
     return pb.authStore.onChange(() => {
       syncUser();
     });
@@ -214,6 +217,7 @@ export default function ChatView({
           project?: { visibility?: string; status?: string };
         };
         if (cancelled) return;
+        if (pendingRequestIdRef.current) return;
         if (typeof data.html === 'string' && data.html.trim()) {
           htmlSourceRef.current = data.html;
           setHtmlSource(data.html);
@@ -735,7 +739,9 @@ export default function ChatView({
                     ).
                   </p>
                 ) : null}
-                {projectIdFromUrl?.trim() && !sessionAuthed ? (
+                {authResolved &&
+                projectIdFromUrl?.trim() &&
+                !sessionAuthed ? (
                   <p className="mt-3 text-xs text-muted-foreground max-w-[260px] leading-relaxed">
                     Sign in to load saved HTML for this project from your account.
                   </p>

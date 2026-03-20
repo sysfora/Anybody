@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { ChatShell } from "./chat-shell";
 
 export const metadata: Metadata = {
   title: "Chat - Anybody.dev",
@@ -10,6 +11,11 @@ export default function ChatLayout({
 }: {
   children: React.ReactNode;
 }) {
-  return <>{children}</>;
+  return (
+    <>
+      <ChatShell />
+      {children}
+    </>
+  );
 }
 
