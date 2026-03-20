@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import pb from '@/lib/pocketbase';
+import { escapePbFilterString } from '@/lib/session-user';
 
 export async function GET(request: NextRequest) {
   try {
@@ -25,9 +26,11 @@ export async function GET(request: NextRequest) {
     const user = await pb.collection('users').getOne(userId);
     const username = user.username || userId;
 
+    const safeUserId = escapePbFilterString(userId);
+
     // Get projects from PocketBase with pagination
     const projects = await pb.collection('projects').getList(page, perPage, {
-      filter: `user = "${userId}"`,
+      filter: `user = "${safeUserId}"`,
       sort: '-created',
     });
 
@@ -93,11 +96,20 @@ export async function DELETE(request: NextRequest) {
       process.env.POCKETBASE_SUPERADMIN_PASSWORD!
     );
 
-    // Delete project from PocketBase
-    await pb.collection('projects').delete(projectId);
+    const safeName = escapePbFilterString(projectName);
 
-    // Note: R2 deletion should be handled separately if needed
-    // This endpoint only handles database deletion
+    const rows = await pb.collection('projects').getList(1, 1, {
+      filter: `id = "${escapePbFilterString(projectId)}" && user = "${escapePbFilterString(userId)}" && name = "${safeName}"`,
+    });
+
+    if (rows.items.length === 0) {
+      return NextResponse.json(
+        { error: 'Project not found or access denied' },
+        { status: 404 },
+      );
+    }
+
+    await pb.collection('projects').delete(projectId);
 
     return NextResponse.json({
       success: true,

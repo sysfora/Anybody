@@ -278,7 +278,6 @@ Anybody/
 │   ├── verify-account/
 │   └── api/                      # API routes
 │       ├── credits/
-│       ├── project/
 │       ├── projects/
 │       ├── stripe/
 │       ├── subscription/
@@ -288,16 +287,10 @@ Anybody/
 │
 ├── components/                   # React components
 │   ├── Home/                     # Landing (Navbar, Footer, etc.)
-│   ├── Dashboard/                 # Dashboard (Chat, Projects, Settings, etc.)
-│   ├── FileUpload.tsx            # File upload
-│   ├── FileStream.tsx            # Code streaming display
-│   ├── StatusDisplay.tsx         # Status updates
-│   ├── FileTree.tsx
+│   ├── Dashboard/                # Chat, projects, settings, team, etc.
 │   └── ui/                       # UI primitives (button, card, dialog, etc.)
 │
-├── lib/                          # Utilities
-│   ├── socket.ts                 # WebSocket client
-│   └── api.ts                    # REST API client
+├── lib/                          # Utilities (socket, PocketBase, etc.)
 │
 ├── hooks/                        # React hooks
 ├── context/                      # React context
@@ -341,14 +334,14 @@ Create `.env` or `.env.local` in the **project root** (Next.js frontend).
 | `SMTP_PASS` | SMTP password / app password |
 | `SMTP_FROM_EMAIL` | From address for outgoing email |
 | `SMTP_FROM_NAME` | From display name (e.g. `Anybody`) |
-| `R2_ENDPOINT_URL` | Cloudflare R2 endpoint URL |
-| `R2_ACCESS_KEY_ID` | R2 access key ID |
-| `R2_SECRET_ACCESS_KEY` | R2 secret access key |
-| `R2_BUCKET_NAME` | R2 bucket name |
 | `NEXT_PUBLIC_API_URL` | Backend API base URL (e.g. `https://app.anybody.dev` or `http://localhost:5000`) |
 | `NEXT_PUBLIC_WS_URL` | WebSocket server URL (same as API in most setups) |
 | `NEXT_PUBLIC_MAX_ATTACHMENTS` | Max number of file attachments (default: `5`) |
 | `NEXT_PUBLIC_MAX_ATTACHMENT_SIZE_MB` | Max file size per attachment in MB (default: `10`) |
+
+#### Chat projects (PocketBase `html` field)
+
+When signed in, the Next app creates a `projects` row (`POST /api/projects/create`) and navigates to `/chat/{projectName}` as soon as you send a message. The **Python Socket.IO server** (`npm run dev:ws`) saves the generated HTML into the project’s **`html`** field via the PocketBase admin API when streaming finishes (passes `project_id` in `user_message`). Configure the same PocketBase URL and superadmin credentials for `uvicorn` (see `server/README.md`; root `.env` is auto-loaded if `python-dotenv` is installed). `GET /api/projects/load` loads saved HTML on refresh.
 
 ---
 
@@ -363,16 +356,6 @@ Create `.env` in the **`server/`** directory (Flask/generation backend).
 | `FLASK_APP` | Flask application entry (e.g. `app.py`) |
 | `FLASK_ENV` | Environment: `development` or `production` |
 | `SECRET_KEY` | Flask secret key (use a strong random value in production) |
-
-#### R2 storage
-
-| Variable | Description |
-|----------|-------------|
-| `R2_ACCOUNT_ID` | Cloudflare R2 account ID |
-| `R2_ACCESS_KEY_ID` | R2 access key ID |
-| `R2_SECRET_ACCESS_KEY` | R2 secret access key |
-| `R2_BUCKET_NAME` | R2 bucket name |
-| `R2_ENDPOINT_URL` | R2 endpoint URL |
 
 #### Repository / GitHub
 

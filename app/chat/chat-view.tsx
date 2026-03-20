@@ -1,6 +1,13 @@
 'use client';
 
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useCallback,
+  startTransition,
+} from 'react';
 import { flushSync } from 'react-dom';
 import {
   ArrowUp,
@@ -29,6 +36,7 @@ import { cn } from '@/lib/utils';
 import NextImage from 'next/image';
 import { useRouter } from 'next/navigation';
 import { getSocket } from '@/lib/socket';
+import pb from '@/lib/pocketbase';
 
 interface AttachedFile {
   file: File;
@@ -76,13 +84,10 @@ export default function ChatView({
   const generationWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-
-  const clearGenerationWatchdog = useCallback(() => {
-    if (generationWatchdogRef.current) {
-      clearTimeout(generationWatchdogRef.current);
-      generationWatchdogRef.current = null;
-    }
-  }, []);
+  const htmlSourceRef = useRef('');
+  const projectNameRef = useRef<string | null>(null);
+  const projectIdFromUrlRef = useRef<string | undefined>(projectIdFromUrl);
+  const routerRef = useRef(router);
 
   const {
     projectName,
@@ -95,6 +100,43 @@ export default function ChatView({
     previewUrl,
     setRefreshCallback,
   } = useProject();
+
+  useEffect(() => {
+    routerRef.current = router;
+  }, [router]);
+
+  useEffect(() => {
+    htmlSourceRef.current = htmlSource;
+  }, [htmlSource]);
+
+  useEffect(() => {
+    projectNameRef.current = projectName;
+  }, [projectName]);
+
+  useEffect(() => {
+    projectIdFromUrlRef.current = projectIdFromUrl;
+  }, [projectIdFromUrl]);
+
+  const [sessionAuthed, setSessionAuthed] = useState(pb.authStore.isValid);
+
+  useEffect(() => {
+    const syncUser = () => {
+      setSessionAuthed(pb.authStore.isValid);
+      const model = pb.authStore.model as { id?: string } | undefined;
+      setUserId(model?.id ?? null);
+    };
+    syncUser();
+    return pb.authStore.onChange(() => {
+      syncUser();
+    });
+  }, [setUserId]);
+
+  const clearGenerationWatchdog = useCallback(() => {
+    if (generationWatchdogRef.current) {
+      clearTimeout(generationWatchdogRef.current);
+      generationWatchdogRef.current = null;
+    }
+  }, []);
 
   const handleRefreshPreview = useCallback(() => {
     setIframeKey((k) => k + 1);
@@ -131,14 +173,70 @@ export default function ChatView({
   }, [handleRefreshPreview, setRefreshCallback]);
 
   useLayoutEffect(() => {
-    if (projectIdFromUrl) {
-      setProjectName(decodeURIComponent(projectIdFromUrl));
+    if (projectIdFromUrl?.trim()) {
+      setProjectName(decodeURIComponent(projectIdFromUrl.trim()));
     } else {
       setProjectName(null);
     }
-    setUserId('demo-user');
     setStatus('completed');
-  }, [projectIdFromUrl, setProjectName, setUserId, setStatus]);
+  }, [projectIdFromUrl, setProjectName, setStatus]);
+
+  const loadedProjectKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const raw = projectIdFromUrl?.trim();
+    if (!raw) {
+      loadedProjectKeyRef.current = null;
+      return;
+    }
+    const decoded = decodeURIComponent(raw);
+    if (!sessionAuthed) {
+      loadedProjectKeyRef.current = null;
+      return;
+    }
+    if (loadedProjectKeyRef.current === decoded) return;
+
+    let cancelled = false;
+    loadedProjectKeyRef.current = decoded;
+
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/projects/load?projectName=${encodeURIComponent(decoded)}`,
+          { credentials: 'include' },
+        );
+        if (!res.ok) {
+          loadedProjectKeyRef.current = null;
+          return;
+        }
+        const data = (await res.json()) as {
+          html?: string;
+          project?: { visibility?: string; status?: string };
+        };
+        if (cancelled) return;
+        if (typeof data.html === 'string' && data.html.trim()) {
+          htmlSourceRef.current = data.html;
+          setHtmlSource(data.html);
+        }
+        if (
+          data.project?.visibility === 'public' ||
+          data.project?.visibility === 'private'
+        ) {
+          setVisibility(data.project.visibility as VisibilityOption);
+        }
+        setProjectName(decoded);
+      } catch {
+        loadedProjectKeyRef.current = null;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (loadedProjectKeyRef.current === decoded) {
+        loadedProjectKeyRef.current = null;
+      }
+    };
+  }, [projectIdFromUrl, sessionAuthed, setProjectName]);
 
   useEffect(() => {
     if (previewObjectUrlRef.current) {
@@ -190,7 +288,11 @@ export default function ChatView({
 
     const onCodeChunk = (payload: { request_id: string; chunk: string }) => {
       if (payload.request_id !== pendingRequestIdRef.current) return;
-      setHtmlSource((prev) => prev + payload.chunk);
+      setHtmlSource((prev) => {
+        const next = prev + payload.chunk;
+        htmlSourceRef.current = next;
+        return next;
+      });
     };
 
     const onAssistantReply = (payload: {
@@ -332,10 +434,10 @@ export default function ChatView({
       setProjectName(null);
     }
 
-    setUserId('demo-user');
     setStatus('completed');
     setPrompt('');
     setAttachedFiles([]);
+    htmlSourceRef.current = '';
     setHtmlSource('');
     setChatMessages([]);
     setIframeKey((k) => k + 1);
@@ -351,7 +453,14 @@ export default function ChatView({
 
     submitInFlightRef.current = true;
     try {
-      if (!projectIdFromUrl && !projectName?.trim()) {
+      let resolvedProjectName = projectName?.trim() || '';
+      const urlName = projectIdFromUrl?.trim()
+        ? decodeURIComponent(projectIdFromUrl.trim()).trim()
+        : '';
+
+      if (urlName) {
+        resolvedProjectName = urlName;
+      } else if (!resolvedProjectName) {
         let name = '';
         try {
           const res = await fetch('/api/random-project-name');
@@ -367,7 +476,43 @@ export default function ChatView({
         if (!name) {
           name = `project-${Date.now().toString(36)}`;
         }
+        resolvedProjectName = name;
         setProjectName(name);
+      }
+
+      projectNameRef.current = resolvedProjectName;
+
+      let pocketbaseProjectId: string | undefined;
+      if (pb.authStore.isValid && resolvedProjectName) {
+        try {
+          const res = await fetch('/api/projects/create', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: resolvedProjectName,
+              visibility,
+            }),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as { id?: string };
+            if (typeof data.id === 'string' && data.id.trim()) {
+              pocketbaseProjectId = data.id.trim();
+            }
+          }
+        } catch {
+          /* non-blocking */
+        }
+      }
+
+      const urlSlug = projectIdFromUrl?.trim();
+      if (!urlSlug && resolvedProjectName) {
+        startTransition(() => {
+          routerRef.current.replace(
+            `/chat/${encodeURIComponent(resolvedProjectName)}`,
+            { scroll: false },
+          );
+        });
       }
 
       const userContent =
@@ -391,6 +536,7 @@ export default function ChatView({
       codeStickBottomRef.current = true;
 
       flushSync(() => {
+        htmlSourceRef.current = '';
         setHtmlSource('');
         setChatMessages((prev) => [
           ...prev,
@@ -432,12 +578,19 @@ export default function ChatView({
         );
         pendingAssistantIdRef.current = null;
         pendingRequestIdRef.current = null;
-        setHtmlSource((h) => (h.length > 0 ? h : ''));
+        setHtmlSource((h) => {
+          const next = h.length > 0 ? h : '';
+          htmlSourceRef.current = next;
+          return next;
+        });
       }, 30000);
 
       socket.emit('user_message', {
         text: userContent,
         request_id: requestId,
+        ...(pocketbaseProjectId
+          ? { project_id: pocketbaseProjectId }
+          : {}),
       });
     } finally {
       submitInFlightRef.current = false;
@@ -580,6 +733,11 @@ export default function ChatView({
                     </code>{' '}
                     (see <code className="font-mono text-[11px]">server/README.md</code>
                     ).
+                  </p>
+                ) : null}
+                {projectIdFromUrl?.trim() && !sessionAuthed ? (
+                  <p className="mt-3 text-xs text-muted-foreground max-w-[260px] leading-relaxed">
+                    Sign in to load saved HTML for this project from your account.
                   </p>
                 ) : null}
               </div>

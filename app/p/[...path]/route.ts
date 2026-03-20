@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getS3Client, rewriteAbsolutePaths, fetchFileFromR2 } from '@/lib/r2';
+import { rewriteAbsolutePaths } from '@/lib/rewrite-html-paths';
 import pb from '@/lib/pocketbase';
 import { cookies } from 'next/headers';
 import type { RecordModel } from 'pocketbase';
 import { getEffectiveUserId } from '@/lib/server-utils';
+import { escapePbFilterString } from '@/lib/session-user';
 
 // Helper function to create beautiful error pages
 function createErrorPage(status: number, title: string, message: string): NextResponse {
@@ -146,25 +147,6 @@ export async function GET(
       }
     }
 
-    // Check if R2 is configured
-    if (!process.env.R2_BUCKET_NAME) {
-      return createErrorPage(
-        503,
-        'Service Unavailable',
-        'R2 storage is not configured. Please configure R2_BUCKET_NAME and related settings.'
-      );
-    }
-
-    // Initialize S3 client
-    const s3Client = getS3Client();
-    if (!s3Client) {
-      return createErrorPage(
-        500,
-        'Server Error',
-        'Failed to initialize R2 connection. Please try again later.'
-      );
-    }
-
     // Extract project path from URL
     // URL format: /p/username/projectname/filepath
     const { path } = await params;
@@ -188,8 +170,10 @@ export async function GET(
       process.env.POCKETBASE_SUPERADMIN_PASSWORD!
     );
 
+    const safeUsername = escapePbFilterString(username);
+
     const users = await pb.collection('users').getList(1, 1, {
-      filter: `username = "${username}"`,
+      filter: `username = "${safeUsername}"`,
     });
 
     if (users.items.length === 0) {
@@ -201,7 +185,6 @@ export async function GET(
     }
 
     const userId = users.items[0].id;
-    const projectId = `${userId}/${projectName}`;
 
     // Check if user is logged in by looking for auth token
     // Since localStorage is client-side only, we check query params, headers, or cookies
@@ -236,10 +219,19 @@ export async function GET(
       process.env.POCKETBASE_SUPERADMIN_PASSWORD!
     );
 
+    const safeProjectName = escapePbFilterString(projectName);
+
+    type VerifiedProjectRow = {
+      html?: string;
+      visibility?: string;
+      deployed?: boolean;
+    };
+    let verifiedProject: VerifiedProjectRow | null = null;
+
     // Check project visibility and deployment status
     try {
       const projects = await pb.collection('projects').getList(1, 1, {
-        filter: `user = "${userId}" && name = "${projectName}"`,
+        filter: `user = "${userId}" && name = "${safeProjectName}"`,
       });
 
       if (projects.items.length === 0) {
@@ -251,10 +243,11 @@ export async function GET(
       }
 
       const project = projects.items[0];
+      verifiedProject = project as VerifiedProjectRow;
 
       // Check if user owns this project or is a team member of the owner
       let isOwner = loggedInUserId === userId;
-      
+
       // If not direct owner, check if logged-in user is a team member
       if (!isOwner && loggedInUserId) {
         try {
@@ -290,105 +283,52 @@ export async function GET(
 
     // Get file path (everything after username/projectname)
     const filePath = pathSegments.slice(2).join('/') || 'index.html';
+    const isPrimaryHtml =
+      filePath === 'index.html' || !pathSegments[2];
 
-    // Construct the R2 key for the file in the dist folder
-    // Format: {projectId}/dist/{filePath} where projectId is userid/projectname
-    const r2Key = `${projectId}/dist/${filePath}`;
+    const storedHtml =
+      verifiedProject &&
+      typeof verifiedProject.html === 'string' &&
+      verifiedProject.html.trim()
+        ? verifiedProject.html
+        : '';
 
-    try {
-      // Fetch the file from R2
-      const { content, contentType } = await fetchFileFromR2(
-        s3Client,
-        process.env.R2_BUCKET_NAME,
-        r2Key
-      );
+    const cacheHeaders = {
+      'Cache-Control':
+        'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+      Pragma: 'no-cache',
+      Expires: '0',
+    };
 
-      // Check if this is a binary file that shouldn't be processed
-      const isBinaryFile = !['text/html', 'text/css', 'application/javascript', 'text/plain'].includes(contentType);
-
-      if (isBinaryFile) {
-        // Return binary files directly without processing
-        return new NextResponse(new Uint8Array(content), {
-          status: 200,
-          headers: {
-            'Content-Type': contentType,
-            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
-            'Pragma': 'no-cache',
-            'Expires': '0',
-          },
-        });
-      }
-
-      // Rewrite absolute paths in text-based files
-      // Use username/projectname for public URLs (not userid)
+    if (isPrimaryHtml && storedHtml) {
       const publicPath = `${username}/${projectName}`;
       const processedContent = rewriteAbsolutePaths(
-        content.toString('utf-8'),
-        contentType,
-        publicPath
+        storedHtml,
+        'text/html',
+        publicPath,
       );
-
-      // Return the file with appropriate content type
       return new NextResponse(processedContent, {
         status: 200,
         headers: {
-          'Content-Type': contentType,
-          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
-          'Pragma': 'no-cache',
-          'Expires': '0',
+          'Content-Type': 'text/html; charset=utf-8',
+          ...cacheHeaders,
         },
       });
+    }
 
-    } catch (error) {
-      // If the file is not found and it's a directory-like path (no extension),
-      // try to serve index.html from that directory
-      if (error instanceof Error && error.message === 'File not found' && !filePath.includes('.')) {
-        try {
-          const indexKey = `${projectId}/dist/${filePath}/index.html`;
-          const { content } = await fetchFileFromR2(
-            s3Client,
-            process.env.R2_BUCKET_NAME,
-            indexKey
-          );
-
-          // Use username/projectname for public URLs (not userid)
-          const publicPath = `${username}/${projectName}`;
-          const processedContent = rewriteAbsolutePaths(
-            content.toString('utf-8'),
-            'text/html',
-            publicPath
-          );
-
-          return new NextResponse(processedContent, {
-            status: 200,
-            headers: {
-              'Content-Type': 'text/html',
-              'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
-              'Pragma': 'no-cache',
-              'Expires': '0',
-            },
-          });
-        } catch {
-          // Fall through to 404 error
-        }
-      }
-
-      // Return 404 for file not found
-      if (error instanceof Error && error.message === 'File not found') {
-        return createErrorPage(
-          404,
-          'File Not Found',
-          `The requested file does not exist in project '${username}/${projectName}'.`
-        );
-      }
-
-      // Return 500 for other errors
+    if (isPrimaryHtml) {
       return createErrorPage(
-        500,
-        'Server Error',
-        error instanceof Error ? error.message : 'An unknown error occurred while fetching the file.'
+        404,
+        'Not Found',
+        'No HTML is stored for this project yet.',
       );
     }
+
+    return createErrorPage(
+      404,
+      'Not Found',
+      'This project only has a single saved page. Open the project URL without extra path segments.',
+    );
 
   } catch (error) {
     return createErrorPage(

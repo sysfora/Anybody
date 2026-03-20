@@ -7,8 +7,20 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+
+    _repo_root = Path(__file__).resolve().parent.parent
+    load_dotenv(_repo_root / ".env")
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+except ImportError:
+    pass
 
 import socketio
+
+from pocketbase_save import save_project_html
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dummy_ws")
@@ -96,7 +108,12 @@ def _build_fake_html(user_text: str) -> str:
 </html>"""
 
 
-async def _stream_generation(sid: str, user_text: str, request_id: str) -> None:
+async def _stream_generation(
+    sid: str,
+    user_text: str,
+    request_id: str,
+    project_id: str | None = None,
+) -> None:
     thinking_lines = [
         f'Parsing user intent from: "{user_text[:120]}{"…" if len(user_text) > 120 else ""}"\n\n',
         "Selecting single-file HTML output (no build step).\n\n",
@@ -125,6 +142,9 @@ async def _stream_generation(sid: str, user_text: str, request_id: str) -> None:
                 room=sid,
             )
             await asyncio.sleep(CODE_DELAY_S)
+
+        if project_id:
+            await save_project_html(project_id, doc)
 
         await sio.emit(
             "assistant_reply",
@@ -161,9 +181,17 @@ async def user_message(sid, data):
         return
     text = (data.get("text") or "").strip()
     request_id = data.get("request_id") or "unknown"
-    logger.info("user_message sid=%s request_id=%s len=%s", sid, request_id, len(text))
+    raw_pid = data.get("project_id")
+    project_id = raw_pid.strip() if isinstance(raw_pid, str) and raw_pid.strip() else None
+    logger.info(
+        "user_message sid=%s request_id=%s len=%s project_id=%s",
+        sid,
+        request_id,
+        len(text),
+        project_id or "-",
+    )
     key = _task_key(sid, request_id)
-    t = asyncio.create_task(_stream_generation(sid, text, request_id))
+    t = asyncio.create_task(_stream_generation(sid, text, request_id, project_id))
     _generation_tasks[key] = t
 
     def _cleanup(_: asyncio.Task) -> None:

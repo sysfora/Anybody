@@ -62,7 +62,7 @@ export function loadSlugWords(): string[] {
   return cachedWords;
 }
 
-/** Three distinct random words, hyphenated (same scheme as `/api/project/generate-name`). */
+/** Three distinct random words, hyphenated (same scheme as `/api/random-project-name`). */
 export function randomSlugFromWords(words: string[]): string {
   if (words.length < 3) {
     return `project-${Date.now().toString(36)}`;

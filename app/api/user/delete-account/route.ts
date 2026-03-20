@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
-import { S3Client, ListObjectsV2Command, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import pb from '@/lib/pocketbase';
 import { TeamMember, Team } from '@/lib/types';
 
@@ -43,7 +42,6 @@ export async function POST(request: NextRequest) {
 
     const deletionResults = {
       stripe: { success: false, message: '' },
-      r2Storage: { success: false, message: '', deletedFiles: 0 },
       projects: { success: false, message: '', deletedCount: 0 },
       teams: { success: false, message: '' },
       user: { success: false, message: '' },
@@ -93,82 +91,7 @@ export async function POST(request: NextRequest) {
     }
 
     // ============================================
-    // 2. R2 STORAGE: Delete all project files
-    // ============================================
-    try {
-      const bucketName = process.env.R2_BUCKET_NAME;
-      
-      if (bucketName) {
-        const s3Client = new S3Client({
-          region: 'auto',
-          endpoint: process.env.R2_ENDPOINT_URL,
-          credentials: {
-            accessKeyId: process.env.R2_ACCESS_KEY_ID!,
-            secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
-          },
-        });
-
-        // List all objects for this user (prefix: userId/)
-        const userPrefix = `${userId}/`;
-        let continuationToken: string | undefined;
-        let totalDeletedFiles = 0;
-
-        do {
-          const listCommand = new ListObjectsV2Command({
-            Bucket: bucketName,
-            Prefix: userPrefix,
-            ContinuationToken: continuationToken,
-          });
-
-          const listResponse = await s3Client.send(listCommand);
-          const objects = listResponse.Contents || [];
-
-          // Delete all objects
-          if (objects.length > 0) {
-            const deletePromises = objects.map((obj) => {
-              if (obj.Key) {
-                return s3Client.send(
-                  new DeleteObjectCommand({
-                    Bucket: bucketName,
-                    Key: obj.Key,
-                  })
-                );
-              }
-              return Promise.resolve();
-            });
-
-            await Promise.all(deletePromises);
-            totalDeletedFiles += objects.length;
-          }
-
-          continuationToken = listResponse.NextContinuationToken;
-        } while (continuationToken);
-
-        console.log(`Deleted ${totalDeletedFiles} files from R2 for user: ${userId}`);
-        deletionResults.r2Storage = { 
-          success: true, 
-          message: `Deleted ${totalDeletedFiles} files from R2 storage`,
-          deletedFiles: totalDeletedFiles
-        };
-      } else {
-        deletionResults.r2Storage = { 
-          success: true, 
-          message: 'R2 not configured, skipping storage cleanup',
-          deletedFiles: 0
-        };
-      }
-    } catch (r2Error) {
-      console.error('R2 deletion error:', r2Error);
-      deletionResults.r2Storage = { 
-        success: false, 
-        message: r2Error instanceof Error ? r2Error.message : 'Failed to delete R2 files',
-        deletedFiles: 0
-      };
-      // Continue with other deletions
-    }
-
-    // ============================================
-    // 3. PROJECTS: Delete all user's projects from database
+    // 2. PROJECTS: Delete all user's projects from database
     // ============================================
     try {
       // Get all projects for this user

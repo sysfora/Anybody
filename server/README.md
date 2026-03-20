@@ -11,10 +11,22 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+## Environment (PocketBase persistence)
+
+When the client sends `project_id` (PocketBase `projects` record id), the server saves the generated HTML to that record (`html` + `status: completed`) using the **admin** API. Set the same variables as your Next.js app (e.g. in repo root `.env` — load them before `uvicorn`, or export in the shell):
+
+| Variable | Description |
+|----------|-------------|
+| `POCKETBASE_URL` or `NEXT_PUBLIC_POCKETBASE_URL` | PocketBase base URL (no trailing slash) |
+| `POCKETBASE_SUPERADMIN_EMAIL` | Superadmin email |
+| `POCKETBASE_SUPERADMIN_PASSWORD` | Superadmin password |
+
+If these are missing, streaming still works; the DB save is skipped.
+
 ## Run
 
 ```bash
-# from repo root
+# from repo root (loads root .env if you use a tool, or export vars manually)
 npm run dev:ws
 ```
 
@@ -39,7 +51,7 @@ In `ws_app.py`, adjust `THINKING_DELAY_S`, `CODE_DELAY_S`, and chunk sizes at th
 
 | Direction | Event | Payload |
 |-----------|--------|---------|
-| Client → server | `user_message` | `{ text: string, request_id: string }` |
+| Client → server | `user_message` | `{ text, request_id, project_id? }` — optional `project_id` = PocketBase projects record id for saving HTML server-side |
 | Client → server | `stop_generation` | `{ request_id: string }` — cancels the in-flight stream for that id |
 | Server → client | `thinking_chunk` | `{ request_id, chunk }` |
 | Server → client | `code_chunk` | `{ request_id, chunk }` |

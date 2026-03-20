@@ -1,11 +1,12 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { Edit, Download, Trash2, Plus, Eye, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import Link from "next/link"
+import pb from "@/lib/pocketbase"
 import {
     AlertDialog,
     AlertDialogAction,
@@ -28,44 +29,60 @@ type Project = {
     status: string
 }
 
-const DUMMY_PROJECTS: Project[] = [
-    {
-        id: "demo-1",
-        name: "swift-river-a1b2c3",
-        dateCreated: "2025-01-15T12:00:00.000Z",
-        expiresIn: "30 days",
-        deployed: true,
-        visibility: "public",
-        username: "demo-user",
-        status: "completed",
-    },
-    {
-        id: "demo-2",
-        name: "landing-page",
-        dateCreated: "2025-02-01T10:30:00.000Z",
-        expiresIn: "Never",
-        deployed: false,
-        visibility: "private",
-        username: "demo-user",
-        status: "completed",
-    },
-    {
-        id: "demo-3",
-        name: "portfolio-site",
-        dateCreated: "2025-02-10T08:00:00.000Z",
-        expiresIn: "14 days",
-        deployed: false,
-        visibility: "public",
-        username: "demo-user",
-        status: "generating",
-    },
-]
-
 export function ProjectsList() {
-    const [projects, setProjects] = useState<Project[]>(DUMMY_PROJECTS)
+    const [projects, setProjects] = useState<Project[]>([])
+    const [loading, setLoading] = useState(true)
+    const [loadError, setLoadError] = useState<string | null>(null)
     const [deletingId, setDeletingId] = useState<string | null>(null)
     const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
     const [projectToDelete, setProjectToDelete] = useState<Project | null>(null)
+    const [downloadBusyId, setDownloadBusyId] = useState<string | null>(null)
+
+    const fetchProjects = useCallback(async () => {
+        if (!pb.authStore.isValid) {
+            setProjects([])
+            setLoading(false)
+            setLoadError(null)
+            return
+        }
+        const model = pb.authStore.model as { id?: string } | undefined
+        const userId = model?.id
+        if (!userId) {
+            setProjects([])
+            setLoading(false)
+            return
+        }
+        setLoading(true)
+        setLoadError(null)
+        try {
+            const res = await fetch(
+                `/api/projects?userId=${encodeURIComponent(userId)}&perPage=100`,
+            )
+            const data = (await res.json()) as {
+                success?: boolean
+                projects?: Project[]
+                error?: string
+            }
+            if (!res.ok) {
+                setLoadError(data.error || "Failed to load projects")
+                setProjects([])
+                return
+            }
+            setProjects(data.projects ?? [])
+        } catch {
+            setLoadError("Failed to load projects")
+            setProjects([])
+        } finally {
+            setLoading(false)
+        }
+    }, [])
+
+    useEffect(() => {
+        void fetchProjects()
+        return pb.authStore.onChange(() => {
+            void fetchProjects()
+        })
+    }, [fetchProjects])
 
     const isProjectBusy = (project: Project): boolean => {
         const status = project.status?.toLowerCase()
@@ -105,13 +122,71 @@ export function ProjectsList() {
         setDeleteDialogOpen(true)
     }
 
-    const confirmDelete = () => {
+    const confirmDelete = async () => {
         if (!projectToDelete) return
+        const model = pb.authStore.model as { id?: string } | undefined
+        const userId = model?.id
+        if (!userId) return
+
         setDeletingId(projectToDelete.id)
-        setProjects((prev) => prev.filter((p) => p.id !== projectToDelete.id))
-        setDeletingId(null)
-        setDeleteDialogOpen(false)
-        setProjectToDelete(null)
+        try {
+            const res = await fetch("/api/projects", {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    userId,
+                    projectId: projectToDelete.id,
+                    projectName: projectToDelete.name,
+                }),
+            })
+            if (res.ok) {
+                setProjects((prev) => prev.filter((p) => p.id !== projectToDelete.id))
+            }
+        } finally {
+            setDeletingId(null)
+            setDeleteDialogOpen(false)
+            setProjectToDelete(null)
+        }
+    }
+
+    const openPreview = (project: Project) => {
+        const u = project.username?.trim()
+        if (!u) return
+        const path = `/p/${encodeURIComponent(u)}/${encodeURIComponent(project.name)}`
+        window.open(path, "_blank", "noopener,noreferrer")
+    }
+
+    const handleDownload = async (project: Project) => {
+        const model = pb.authStore.model as { id?: string; username?: string } | undefined
+        const userId = model?.id
+        const username = model?.username
+        if (!userId || !username) return
+        setDownloadBusyId(project.id)
+        try {
+            const res = await fetch("/api/projects/download", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    userId,
+                    username,
+                    projectName: project.name,
+                }),
+            })
+            if (!res.ok) {
+                const err = (await res.json().catch(() => ({}))) as { error?: string }
+                console.warn(err.error || res.statusText)
+                return
+            }
+            const blob = await res.blob()
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement("a")
+            a.href = url
+            a.download = `${project.name}.zip`
+            a.click()
+            URL.revokeObjectURL(url)
+        } finally {
+            setDownloadBusyId(null)
+        }
     }
 
     const formatDate = (dateString: string) => {
@@ -121,6 +196,19 @@ export function ProjectsList() {
             month: 'short',
             day: 'numeric',
         })
+    }
+
+    if (!pb.authStore.isValid && !loading) {
+        return (
+            <div className="rounded-lg border border-border bg-card p-8 text-center">
+                <p className="text-muted-foreground text-sm sm:text-base mb-4">
+                    Sign in to see your saved projects and sync chat with PocketBase.
+                </p>
+                <Button asChild variant="default" size="sm">
+                    <Link href="/login">Sign in</Link>
+                </Button>
+            </div>
+        )
     }
 
     return (
@@ -136,6 +224,10 @@ export function ProjectsList() {
                     </Link>
                 </div>
 
+                {loadError ? (
+                    <p className="text-sm text-destructive">{loadError}</p>
+                ) : null}
+
                 <div className="overflow-x-auto rounded-lg border border-border bg-card">
                     <Table>
                         <TableHeader>
@@ -147,7 +239,13 @@ export function ProjectsList() {
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {projects.length === 0 ? (
+                            {loading ? (
+                                <TableRow>
+                                    <TableCell colSpan={4} className="h-32 text-center">
+                                        <Loader2 className="mx-auto h-8 w-8 animate-spin text-muted-foreground" />
+                                    </TableCell>
+                                </TableRow>
+                            ) : projects.length === 0 ? (
                                 <TableRow>
                                     <TableCell colSpan={4} className="h-32 text-center">
                                         <div className="flex flex-col items-center justify-center gap-2">
@@ -201,8 +299,9 @@ export function ProjectsList() {
                                                         variant="ghost"
                                                         size="sm"
                                                         type="button"
-                                                        disabled={isBusy}
-                                                        title={isBusy ? `Project is ${statusLabel?.toLowerCase()}` : "Preview (demo)"}
+                                                        disabled={isBusy || !project.username}
+                                                        onClick={() => openPreview(project)}
+                                                        title="Open public preview"
                                                     >
                                                         <Eye className="h-4 w-4" />
                                                         <span className="sr-only">Preview</span>
@@ -218,10 +317,15 @@ export function ProjectsList() {
                                                         variant="ghost"
                                                         size="sm"
                                                         type="button"
-                                                        disabled={isBusy || isModifying}
-                                                        title="Download (demo)"
+                                                        disabled={isBusy || isModifying || downloadBusyId === project.id}
+                                                        title="Download saved HTML as ZIP (requires active subscription)"
+                                                        onClick={() => void handleDownload(project)}
                                                     >
-                                                        <Download className="h-4 w-4" />
+                                                        {downloadBusyId === project.id ? (
+                                                            <Loader2 className="h-4 w-4 animate-spin" />
+                                                        ) : (
+                                                            <Download className="h-4 w-4" />
+                                                        )}
                                                         <span className="sr-only">Download</span>
                                                     </Button>
                                                     <Button
@@ -246,8 +350,8 @@ export function ProjectsList() {
                 </div>
 
                 <div className="text-center text-sm text-muted-foreground">
-                    {projects.length > 0
-                        ? `Showing ${projects.length} demo project${projects.length === 1 ? '' : 's'}`
+                    {!loading && projects.length > 0
+                        ? `Showing ${projects.length} project${projects.length === 1 ? '' : 's'}`
                         : null}
                 </div>
             </div>
@@ -257,13 +361,13 @@ export function ProjectsList() {
                     <AlertDialogHeader>
                         <AlertDialogTitle>Delete Project</AlertDialogTitle>
                         <AlertDialogDescription>
-                            Remove &quot;{projectToDelete?.name}&quot; from this demo list? (Local only — no server.)
+                            Remove &quot;{projectToDelete?.name}&quot; from your account? Saved HTML stored on the project record will be deleted with it.
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
                         <AlertDialogCancel>Cancel</AlertDialogCancel>
                         <AlertDialogAction
-                            onClick={confirmDelete}
+                            onClick={() => void confirmDelete()}
                             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                         >
                             Delete
