@@ -4,7 +4,7 @@ import { createContext, useContext, useState, useCallback, useRef, ReactNode } f
 
 type ViewMode = "code" | "preview"
 type DeviceSize = "mobile" | "tablet" | "desktop"
-type ProjectStatus = "idle" | "generating" | "modifying" | "building" | "uploading" | "completed" | "cancelled" | "error"
+export type ProjectStatus = "idle" | "generating" | "modifying" | "building" | "uploading" | "completed" | "cancelled" | "error"
 type VisibilityOption = "public" | "private"
 
 interface PendingFile {

@@ -339,9 +339,21 @@ Create `.env` or `.env.local` in the **project root** (Next.js frontend).
 | `NEXT_PUBLIC_MAX_ATTACHMENTS` | Max number of file attachments (default: `5`) |
 | `NEXT_PUBLIC_MAX_ATTACHMENT_SIZE_MB` | Max file size per attachment in MB (default: `10`) |
 
-#### Chat projects (PocketBase `html` field)
+#### Chat projects (PocketBase)
 
-When signed in, the Next app creates a `projects` row (`POST /api/projects/create`) and navigates to `/chat/{projectName}` as soon as you send a message. The **Python Socket.IO server** (`npm run dev:ws`) saves the generated HTML into the project’s **`html`** field via the PocketBase admin API when streaming finishes (passes `project_id` in `user_message`). Configure the same PocketBase URL and superadmin credentials for `uvicorn` (see `server/README.md`; root `.env` is auto-loaded if `python-dotenv` is installed). `GET /api/projects/load` loads saved HTML on refresh.
+When signed in, the Next app creates a `projects` row (`POST /api/projects/create`) and navigates to `/chat/{projectName}` as soon as you send a message. The **Python Socket.IO server** (`npm run dev:ws`) runs generation **in the background**: disconnecting the browser does not cancel the job. It writes **partial HTML** and **chat rows** to PocketBase while streaming, then sets `projects.status` to `completed` (or `error` / `cancelled`). Configure the same PocketBase URL and superadmin credentials for `uvicorn` (see `server/README.md`; root `.env` is auto-loaded if `python-dotenv` is installed). `GET /api/projects/load` returns saved **HTML**, **messages**, and **status** so a refresh restores the thread and preview.
+
+**Collection: `project_messages`** (create in PocketBase Admin → Collections)
+
+| Field | Type | Required | Notes |
+|-------|------|----------|--------|
+| `project` | Relation | Yes | Single relation → collection **`projects`** |
+| `role` | Select | Yes | Values: **`user`**, **`assistant`** |
+| `content` | Text | Yes | Message body (assistant may be empty while streaming) |
+| `thinking` | Text | No | Assistant “reasoning” text (optional) |
+| `request_id` | Text | No | Correlates with Socket.IO `request_id` for a single generation turn |
+
+Enable **list/view** rules as needed (the Next.js `load` route uses the superadmin API; the Python server also uses admin credentials to create/update rows). Optionally turn on **cascade delete** on the relation so deleting a `projects` record removes its messages (the app also deletes related `project_messages` before deleting a project in `DELETE /api/projects`).
 
 ---
 

@@ -28,7 +28,7 @@ import {
   type ChatMessage,
 } from '@/components/Dashboard/ChatMessages';
 import { CodeHighlight } from '@/components/Dashboard/CodeHighlight';
-import { useProject } from '@/context/ProjectContext';
+import { useProject, type ProjectStatus } from '@/context/ProjectContext';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { VisibilityDropdown, type VisibilityOption } from '@/components/ui/visibility-dropdown';
@@ -56,6 +56,36 @@ function isNearScrollBottom(el: HTMLElement) {
   const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
   return gap <= SCROLL_END_THRESHOLD_PX;
 }
+
+function mapProjectStatusFromPb(status?: string): ProjectStatus {
+  if (status === 'generating') return 'generating';
+  if (status === 'error') return 'error';
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'modifying') return 'modifying';
+  if (status === 'building') return 'building';
+  if (status === 'uploading') return 'uploading';
+  if (status === 'idle') return 'idle';
+  return 'completed';
+}
+
+type ProjectLoadPayload = {
+  project?: {
+    id?: string;
+    name?: string;
+    visibility?: string;
+    status?: string;
+    deployed?: boolean;
+  };
+  html?: string;
+  messages?: Array<{
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    thinking: string;
+    created: string;
+    request_id: string;
+  }>;
+};
 
 export default function ChatView({
   projectIdFromUrl,
@@ -86,14 +116,22 @@ export default function ChatView({
   );
   const htmlSourceRef = useRef('');
   const projectNameRef = useRef<string | null>(null);
+  const projectPbIdRef = useRef<string | null>(null);
   const projectIdFromUrlRef = useRef<string | undefined>(projectIdFromUrl);
   const routerRef = useRef(router);
+  const wsConnectedRef = useRef(false);
+  const sessionAuthedRef = useRef(false);
+
+  const [projectLoadStatus, setProjectLoadStatus] = useState<string | null>(
+    null,
+  );
 
   const {
     projectName,
     setProjectName,
     setUserId,
     setStatus,
+    status: ctxProjectStatus,
     setPreviewUrl,
     viewMode,
     deviceSize,
@@ -120,6 +158,10 @@ export default function ChatView({
   // Must match server first paint (no PocketBase session in SSR) to avoid hydration mismatch.
   const [sessionAuthed, setSessionAuthed] = useState(false);
   const [authResolved, setAuthResolved] = useState(false);
+
+  useEffect(() => {
+    sessionAuthedRef.current = sessionAuthed;
+  }, [sessionAuthed]);
 
   useEffect(() => {
     const syncUser = () => {
@@ -180,11 +222,82 @@ export default function ChatView({
       setProjectName(decodeURIComponent(projectIdFromUrl.trim()));
     } else {
       setProjectName(null);
+      setStatus('completed');
+      setProjectLoadStatus(null);
     }
-    setStatus('completed');
   }, [projectIdFromUrl, setProjectName, setStatus]);
 
   const loadedProjectKeyRef = useRef<string | null>(null);
+
+  const fetchProjectLoadData =
+    useCallback(async (): Promise<ProjectLoadPayload | null> => {
+      const raw = projectIdFromUrlRef.current?.trim();
+      if (!raw || !sessionAuthedRef.current) return null;
+      const decoded = decodeURIComponent(raw);
+      try {
+        const res = await fetch(
+          `/api/projects/load?projectName=${encodeURIComponent(decoded)}`,
+          { credentials: 'include' },
+        );
+        if (!res.ok) return null;
+        return (await res.json()) as ProjectLoadPayload;
+      } catch {
+        return null;
+      }
+    }, []);
+
+  const applyProjectLoad = useCallback(
+    (data: ProjectLoadPayload, options?: { force?: boolean }) => {
+      if (data.project?.id) {
+        projectPbIdRef.current = data.project.id;
+      }
+
+      const skipBody =
+        !options?.force &&
+        pendingRequestIdRef.current !== null &&
+        wsConnectedRef.current;
+
+      if (!skipBody) {
+        pendingAssistantIdRef.current = null;
+        pendingRequestIdRef.current = null;
+        clearGenerationWatchdog();
+        const rows = data.messages ?? [];
+        setChatMessages(
+          rows.map((m) => ({
+            id: m.id,
+            type: m.role,
+            content: m.content ?? '',
+            thinking: m.thinking?.trim() ? m.thinking : undefined,
+            timestamp: new Date(m.created),
+          })),
+        );
+        if (typeof data.html === 'string') {
+          htmlSourceRef.current = data.html;
+          setHtmlSource(data.html);
+        }
+        if (
+          data.project?.visibility === 'public' ||
+          data.project?.visibility === 'private'
+        ) {
+          setVisibility(data.project.visibility as VisibilityOption);
+        }
+        let st = data.project?.status ?? 'completed';
+        const lastAssistant = [...rows]
+          .reverse()
+          .find((m) => m.role === 'assistant');
+        const assistantHasText =
+          !!lastAssistant &&
+          typeof lastAssistant.content === 'string' &&
+          lastAssistant.content.trim().length > 0;
+        if (st === 'generating' && assistantHasText) {
+          st = 'completed';
+        }
+        setProjectLoadStatus(st);
+        setStatus(mapProjectStatusFromPb(st));
+      }
+    },
+    [clearGenerationWatchdog, setStatus, setVisibility],
+  );
 
   useEffect(() => {
     const raw = projectIdFromUrl?.trim();
@@ -203,35 +316,14 @@ export default function ChatView({
     loadedProjectKeyRef.current = decoded;
 
     (async () => {
-      try {
-        const res = await fetch(
-          `/api/projects/load?projectName=${encodeURIComponent(decoded)}`,
-          { credentials: 'include' },
-        );
-        if (!res.ok) {
-          loadedProjectKeyRef.current = null;
-          return;
-        }
-        const data = (await res.json()) as {
-          html?: string;
-          project?: { visibility?: string; status?: string };
-        };
-        if (cancelled) return;
-        if (pendingRequestIdRef.current) return;
-        if (typeof data.html === 'string' && data.html.trim()) {
-          htmlSourceRef.current = data.html;
-          setHtmlSource(data.html);
-        }
-        if (
-          data.project?.visibility === 'public' ||
-          data.project?.visibility === 'private'
-        ) {
-          setVisibility(data.project.visibility as VisibilityOption);
-        }
-        setProjectName(decoded);
-      } catch {
+      const data = await fetchProjectLoadData();
+      if (cancelled) return;
+      if (!data) {
         loadedProjectKeyRef.current = null;
+        return;
       }
+      applyProjectLoad(data);
+      setProjectName(decoded);
     })();
 
     return () => {
@@ -240,7 +332,31 @@ export default function ChatView({
         loadedProjectKeyRef.current = null;
       }
     };
-  }, [projectIdFromUrl, sessionAuthed, setProjectName]);
+  }, [
+    projectIdFromUrl,
+    sessionAuthed,
+    setProjectName,
+    fetchProjectLoadData,
+    applyProjectLoad,
+  ]);
+
+  useEffect(() => {
+    if (!sessionAuthed || !projectIdFromUrl?.trim()) return;
+    if (projectLoadStatus !== 'generating') return;
+    const id = setInterval(() => {
+      void (async () => {
+        const data = await fetchProjectLoadData();
+        if (data) applyProjectLoad(data);
+      })();
+    }, 2000);
+    return () => clearInterval(id);
+  }, [
+    sessionAuthed,
+    projectIdFromUrl,
+    projectLoadStatus,
+    fetchProjectLoadData,
+    applyProjectLoad,
+  ]);
 
   useEffect(() => {
     if (previewObjectUrlRef.current) {
@@ -271,8 +387,88 @@ export default function ChatView({
   useEffect(() => {
     const socket = getSocket();
 
-    const onConnect = () => setWsConnected(true);
-    const onDisconnect = () => setWsConnected(false);
+    const onConnect = () => {
+      wsConnectedRef.current = true;
+      setWsConnected(true);
+      void (async () => {
+        const data = await fetchProjectLoadData();
+        if (!data) return;
+        const st = data?.project?.status;
+        if (st === 'generating') {
+          const pbId = data.project?.id;
+          if (pbId) {
+            projectPbIdRef.current = pbId;
+            // Apply whatever partial state is in DB so the UI isn't blank.
+            applyProjectLoad(data);
+            // Subscribe to the live broadcast room to receive future chunks
+            // and a catch-up snapshot of everything streamed so far.
+            getSocket().emit('subscribe_project', { project_id: pbId });
+          }
+        } else if (st === 'completed' || st === 'error' || st === 'cancelled') {
+          applyProjectLoad(data, { force: true });
+        }
+      })();
+    };
+    const onDisconnect = () => {
+      wsConnectedRef.current = false;
+      setWsConnected(false);
+    };
+
+    const onProjectSnapshot = (payload: {
+      active: boolean;
+      request_id?: string;
+      thinking?: string;
+      html?: string;
+      reply?: string;
+    }) => {
+      if (!payload.active) return;
+
+      const t = Date.now();
+      const pendingId = `pending-${t}`;
+
+      // Restore streamed HTML so the code/preview panes show progress.
+      if (payload.html) {
+        htmlSourceRef.current = payload.html;
+        setHtmlSource(payload.html);
+      }
+
+      // Replace the last assistant message with a pending-* one that carries
+      // the accumulated thinking/reply so the live-generation UI takes over.
+      setChatMessages((prev) => {
+        const newMessages = [...prev];
+        let found = false;
+        for (let i = newMessages.length - 1; i >= 0; i--) {
+          if (newMessages[i].type === 'assistant') {
+            newMessages[i] = {
+              ...newMessages[i],
+              id: pendingId,
+              thinking: payload.thinking ?? newMessages[i].thinking ?? '',
+              content: payload.reply ?? newMessages[i].content ?? '',
+            };
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          newMessages.push({
+            id: pendingId,
+            type: 'assistant',
+            content: payload.reply ?? '',
+            thinking: payload.thinking ?? '',
+            timestamp: new Date(),
+          });
+        }
+        return newMessages;
+      });
+
+      // Wire up the pending refs so future thinking_chunk / code_chunk /
+      // assistant_reply / generation_done events are routed correctly.
+      pendingAssistantIdRef.current = pendingId;
+      pendingRequestIdRef.current = payload.request_id ?? null;
+      setStatus('generating');
+      setProjectLoadStatus('generating');
+      clearGenerationWatchdog();
+    };
 
     const onThinkingChunk = (payload: {
       request_id: string;
@@ -321,15 +517,13 @@ export default function ChatView({
 
     const onGenerationDone = (payload: { request_id: string }) => {
       if (payload.request_id !== pendingRequestIdRef.current) return;
-      const aid = pendingAssistantIdRef.current;
-      if (!aid) return;
-      setChatMessages((prev) =>
-        prev.map((m) =>
-          m.id === aid ? { ...m, id: `assistant-${Date.now()}` } : m,
-        ),
-      );
+      if (!pendingAssistantIdRef.current) return;
       finalizePending();
       setIframeKey((k) => k + 1);
+      void (async () => {
+        const data = await fetchProjectLoadData();
+        if (data) applyProjectLoad(data, { force: true });
+      })();
     };
 
     const onGenerationError = (payload: {
@@ -337,44 +531,27 @@ export default function ChatView({
       message: string;
     }) => {
       if (payload.request_id !== pendingRequestIdRef.current) return;
-      const aid = pendingAssistantIdRef.current;
-      if (!aid) return;
-      setChatMessages((prev) =>
-        prev.map((m) =>
-          m.id === aid
-            ? {
-                ...m,
-                id: `assistant-${Date.now()}`,
-                content: `Generation failed: ${payload.message}`,
-              }
-            : m,
-        ),
-      );
+      if (!pendingAssistantIdRef.current) return;
       finalizePending();
+      void (async () => {
+        const data = await fetchProjectLoadData();
+        if (data) applyProjectLoad(data, { force: true });
+      })();
     };
 
     const onGenerationStopped = (payload: { request_id: string }) => {
       if (payload.request_id !== pendingRequestIdRef.current) return;
-      const aid = pendingAssistantIdRef.current;
-      if (!aid) return;
-      setChatMessages((prev) =>
-        prev.map((m) =>
-          m.id === aid
-            ? {
-                ...m,
-                id: `assistant-${Date.now()}`,
-                content: m.content?.trim()
-                  ? `${m.content}\n\nGeneration stopped.`
-                  : 'Generation stopped.',
-              }
-            : m,
-        ),
-      );
+      if (!pendingAssistantIdRef.current) return;
       finalizePending();
+      void (async () => {
+        const data = await fetchProjectLoadData();
+        if (data) applyProjectLoad(data, { force: true });
+      })();
     };
 
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
+    socket.on('project_snapshot', onProjectSnapshot);
     socket.on('thinking_chunk', onThinkingChunk);
     socket.on('code_chunk', onCodeChunk);
     socket.on('assistant_reply', onAssistantReply);
@@ -382,6 +559,7 @@ export default function ChatView({
     socket.on('generation_error', onGenerationError);
     socket.on('generation_stopped', onGenerationStopped);
 
+    wsConnectedRef.current = socket.connected;
     setWsConnected(socket.connected);
     if (!socket.connected) {
       socket.connect();
@@ -391,6 +569,7 @@ export default function ChatView({
       clearGenerationWatchdog();
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
+      socket.off('project_snapshot', onProjectSnapshot);
       socket.off('thinking_chunk', onThinkingChunk);
       socket.off('code_chunk', onCodeChunk);
       socket.off('assistant_reply', onAssistantReply);
@@ -398,7 +577,7 @@ export default function ChatView({
       socket.off('generation_error', onGenerationError);
       socket.off('generation_stopped', onGenerationStopped);
     };
-  }, [clearGenerationWatchdog]);
+  }, [clearGenerationWatchdog, fetchProjectLoadData, applyProjectLoad]);
 
   const handleStopGeneration = useCallback(() => {
     const req = pendingRequestIdRef.current;
@@ -439,6 +618,7 @@ export default function ChatView({
     }
 
     setStatus('completed');
+    setProjectLoadStatus(null);
     setPrompt('');
     setAttachedFiles([]);
     htmlSourceRef.current = '';
@@ -448,11 +628,16 @@ export default function ChatView({
     router.push('/chat', { scroll: false });
   };
 
+  const busy =
+    chatMessages.some((m) => m.id.startsWith('pending-')) ||
+    ctxProjectStatus === 'generating' ||
+    projectLoadStatus === 'generating';
+
   const handleSubmit = async () => {
     const text = prompt.trim();
     if (!text && attachedFiles.length === 0) return;
     if (!wsConnected) return;
-    if (chatMessages.some((m) => m.id.startsWith('pending-'))) return;
+    if (busy) return;
     if (submitInFlightRef.current) return;
 
     submitInFlightRef.current = true;
@@ -502,6 +687,7 @@ export default function ChatView({
             const data = (await res.json()) as { id?: string };
             if (typeof data.id === 'string' && data.id.trim()) {
               pocketbaseProjectId = data.id.trim();
+              projectPbIdRef.current = pocketbaseProjectId;
             }
           }
         } catch {
@@ -531,6 +717,8 @@ export default function ChatView({
 
       pendingAssistantIdRef.current = pendingId;
       pendingRequestIdRef.current = requestId;
+      setStatus('generating');
+      setProjectLoadStatus('generating');
 
       const socket = getSocket();
       if (!socket.connected) {
@@ -582,6 +770,8 @@ export default function ChatView({
         );
         pendingAssistantIdRef.current = null;
         pendingRequestIdRef.current = null;
+        setStatus('completed');
+        setProjectLoadStatus('completed');
         setHtmlSource((h) => {
           const next = h.length > 0 ? h : '';
           htmlSourceRef.current = next;
@@ -660,9 +850,13 @@ export default function ChatView({
   };
 
   const hasProject = !!projectName?.trim();
-  const busy = chatMessages.some((m) => m.id.startsWith('pending-'));
   const pendingAssistantId =
     chatMessages.find((m) => m.id.startsWith('pending-'))?.id ?? null;
+  const hasLocalPendingTurn = pendingAssistantId !== null;
+  const remoteGenerationSuggested =
+    !hasLocalPendingTurn &&
+    (projectLoadStatus === 'generating' ||
+      ctxProjectStatus === 'generating');
   const canStartNewProject =
     !!projectIdFromUrl ||
     chatMessages.length > 0 ||
@@ -750,7 +944,9 @@ export default function ChatView({
             ) : (
               <ChatMessages
                 messages={chatMessages}
-                pendingAssistantId={pendingAssistantId}
+                pendingStreamingAssistantId={pendingAssistantId}
+                generationActive={hasLocalPendingTurn}
+                remoteGenerationSuggested={remoteGenerationSuggested}
               />
             )}
           </div>

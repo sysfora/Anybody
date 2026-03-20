@@ -3,3 +3,4 @@ uvicorn[standard]==0.32.1
 python-engineio==4.10.1
 httpx==0.28.1
 python-dotenv==1.0.1
+pocketbase==0.15.0

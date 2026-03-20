@@ -48,9 +48,17 @@ function renderInlineContent(text: string) {
 function AssistantBlock({
   message,
   suppressWorkingPlaceholder,
+  generationActive,
+  showCompletedEmptyHint,
+  showRemoteGenerationHint,
 }: {
   message: ChatMessage;
   suppressWorkingPlaceholder?: boolean;
+  /** Live socket turn only (`pending-*` rows). */
+  generationActive: boolean;
+  showCompletedEmptyHint?: boolean;
+  /** Server still reports generating but this isn’t a live pending row (e.g. after refresh). */
+  showRemoteGenerationHint?: boolean;
 }) {
   const awaitingContent = !message.content?.trim();
 
@@ -122,7 +130,10 @@ function AssistantBlock({
         </div>
       ) : null}
 
-      {!suppressWorkingPlaceholder && !showContent && !showThinking ? (
+      {generationActive &&
+      !suppressWorkingPlaceholder &&
+      !showContent &&
+      !showThinking ? (
         <div className="flex items-center gap-2 rounded-xl border border-border bg-muted/20 px-3 py-3">
           <span
             className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/60 animate-pulse"
@@ -130,6 +141,20 @@ function AssistantBlock({
           />
           <span className="text-sm text-muted-foreground">Working…</span>
         </div>
+      ) : null}
+      {showRemoteGenerationHint ? (
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-muted/20 px-3 py-3">
+          <span
+            className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/60 animate-pulse"
+            aria-hidden
+          />
+          <span className="text-sm text-muted-foreground">Generating…</span>
+        </div>
+      ) : null}
+      {showCompletedEmptyHint ? (
+        <p className="text-xs text-muted-foreground">
+          Summary not stored; open the code or preview pane for output.
+        </p>
       ) : null}
     </div>
   );
@@ -172,11 +197,22 @@ function AssistantGeneratingTail() {
 
 export function ChatMessages({
   messages,
-  pendingAssistantId,
+  pendingStreamingAssistantId,
+  generationActive,
+  remoteGenerationSuggested,
 }: {
   messages: ChatMessage[];
-  pendingAssistantId?: string | null;
+  /** Only local `pending-*` assistant id; never a PocketBase id (avoids fake “Generating…” after refresh). */
+  pendingStreamingAssistantId?: string | null;
+  /** True only while this tab has an in-flight `pending-*` assistant message. */
+  generationActive: boolean;
+  /** Project status is generating but there is no local pending row (reconnect / refresh). */
+  remoteGenerationSuggested?: boolean;
 }) {
+  const lastAssistantId = [...messages]
+    .reverse()
+    .find((m) => m.type === 'assistant')?.id;
+
   return (
     <div className="flex flex-col gap-6 px-3 py-4 sm:gap-8 sm:px-4 sm:py-5">
       {messages.map((message) =>
@@ -191,9 +227,26 @@ export function ChatMessages({
             <div className="w-fit max-w-[80%] min-w-0">
               <AssistantBlock
                 message={message}
-                suppressWorkingPlaceholder={pendingAssistantId === message.id}
+                generationActive={generationActive}
+                suppressWorkingPlaceholder={
+                  pendingStreamingAssistantId === message.id ||
+                  !generationActive
+                }
+                showRemoteGenerationHint={
+                  !!remoteGenerationSuggested &&
+                  message.id === lastAssistantId &&
+                  !message.content?.trim() &&
+                  !message.thinking?.trim()
+                }
+                showCompletedEmptyHint={
+                  !generationActive &&
+                  !remoteGenerationSuggested &&
+                  message.id === lastAssistantId &&
+                  !message.content?.trim() &&
+                  !message.thinking?.trim()
+                }
               />
-              {pendingAssistantId === message.id ? (
+              {pendingStreamingAssistantId === message.id && generationActive ? (
                 <AssistantGeneratingTail />
               ) : null}
             </div>

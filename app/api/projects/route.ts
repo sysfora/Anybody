@@ -109,6 +109,18 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
+    const safeProjectId = escapePbFilterString(projectId);
+    try {
+      const msgs = await pb.collection('project_messages').getFullList({
+        filter: `project = "${safeProjectId}"`,
+      });
+      for (const m of msgs) {
+        await pb.collection('project_messages').delete(m.id);
+      }
+    } catch {
+      /* collection may not exist yet */
+    }
+
     await pb.collection('projects').delete(projectId);
 
     return NextResponse.json({

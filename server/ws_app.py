@@ -1,5 +1,7 @@
 """
-Dummy Socket.IO server: fake thinking + streamed HTML from the user's message.
+Socket.IO server: streamed thinking + HTML; persists to PocketBase in the background.
+Generation continues if the client disconnects (tasks keyed by request_id only).
+Reconnecting clients can call subscribe_project to rejoin a live stream.
 Run: uvicorn ws_app:app --host 0.0.0.0 --port 5000 --reload
 """
 from __future__ import annotations
@@ -20,17 +22,25 @@ except ImportError:
 
 import socketio
 
-from pocketbase_save import save_project_html
+from pocketbase_save import (
+    create_message_with_client,
+    patch_project_message_with_client,
+    patch_project_record_with_client,
+    pocketbase_admin,
+    save_project_html,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dummy_ws")
 
-# Tune streaming pace (seconds between chunks) for easier UI inspection.
 THINKING_CHARS_PER_CHUNK = 2
 THINKING_DELAY_S = 0.11
 CODE_CHUNK_MIN = 6
 CODE_CHUNK_MAX = 18
 CODE_DELAY_S = 0.09
+# Flush partial state so refresh shows progress
+THINKING_FLUSH_CHARS = 400
+HTML_FLUSH_CHARS = 2500
 
 sio = socketio.AsyncServer(
     async_mode="asgi",
@@ -42,9 +52,10 @@ app = socketio.ASGIApp(sio)
 
 _generation_tasks: dict[str, asyncio.Task] = {}
 
-
-def _task_key(sid: str, request_id: str) -> str:
-    return f"{sid}:{request_id}"
+# Tracks in-flight generation state per project_id so reconnecting clients
+# can receive a catch-up snapshot and join the live broadcast room.
+# Shape: { project_id: { request_id, thinking_acc, html_acc, reply } }
+_active_generations: dict[str, dict] = {}
 
 
 @sio.event
@@ -54,10 +65,7 @@ async def connect(sid, _environ):
 
 @sio.event
 async def disconnect(sid):
-    logger.info("client disconnected %s", sid)
-    for key, t in list(_generation_tasks.items()):
-        if key.startswith(f"{sid}:") and not t.done():
-            t.cancel()
+    logger.info("client disconnected %s (generation tasks keep running)", sid)
 
 
 def _build_fake_html(user_text: str) -> str:
@@ -102,7 +110,7 @@ def _build_fake_html(user_text: str) -> str:
       <div class="label">Your message</div>
       <p class="prompt">{safe}</p>
     </div>
-    <footer>Generated via Python Socket.IO · not persisted</footer>
+    <footer>Generated via Python Socket.IO · persisted when project_id is set</footer>
   </main>
 </body>
 </html>"""
@@ -114,65 +122,247 @@ async def _stream_generation(
     request_id: str,
     project_id: str | None = None,
 ) -> None:
-    thinking_lines = [
-        f'Parsing user intent from: "{user_text[:120]}{"…" if len(user_text) > 120 else ""}"\n\n',
-        "Selecting single-file HTML output (no build step).\n\n",
-        "Drafting semantic <main>, accessible heading, and a summary card.\n\n",
-        "Streaming markup to the client for live preview.\n",
-    ]
+    assistant_message_id: str | None = None
+    cm = None
+    pb = None
+    thinking_acc = ""
+    html_acc = ""
+    since_thinking_flush = 0
+    since_html_flush = 0
+
+    # Room name for multi-client broadcasting; falls back to just the sender sid.
+    emit_target = f"project-{project_id}" if project_id else sid
+
+    reply_text = (
+        "Streamed a fresh `index.html` from the dummy Python server. "
+        "The preview and code panel update as chunks arrive."
+    )
 
     try:
+        if project_id:
+            try:
+                cm = pocketbase_admin()
+                pb = await cm.__aenter__()
+            except RuntimeError:
+                logger.warning(
+                    "pocketbase not configured; streaming without DB persistence"
+                )
+                cm = None
+                pb = None
+
+        if project_id and pb:
+            await create_message_with_client(
+                pb,
+                project_id,
+                "user",
+                user_text,
+                request_id=request_id,
+            )
+            assistant_message_id = await create_message_with_client(
+                pb,
+                project_id,
+                "assistant",
+                "",
+                request_id=request_id,
+            )
+            await patch_project_record_with_client(
+                pb,
+                project_id,
+                html="",
+                status="generating",
+            )
+
+        # Register in-flight state and join the project room so all
+        # subscribed clients (including reconnects) receive every event.
+        if project_id:
+            _active_generations[project_id] = {
+                "request_id": request_id,
+                "thinking_acc": "",
+                "html_acc": "",
+                "reply": "",
+            }
+            await sio.enter_room(sid, f"project-{project_id}")
+
+        thinking_lines = [
+            f'Parsing user intent from: "{user_text[:120]}{"…" if len(user_text) > 120 else ""}"\n\n',
+            "Selecting single-file HTML output (no build step).\n\n",
+            "Drafting semantic <main>, accessible heading, and a summary card.\n\n",
+            "Streaming markup to the client for live preview.\n",
+        ]
+
         for line in thinking_lines:
             for i in range(0, len(line), THINKING_CHARS_PER_CHUNK):
                 chunk = line[i : i + THINKING_CHARS_PER_CHUNK]
+                thinking_acc += chunk
+                since_thinking_flush += len(chunk)
+
+                # Keep in-memory state fresh so subscribers get accurate snapshots.
+                if project_id and project_id in _active_generations:
+                    _active_generations[project_id]["thinking_acc"] = thinking_acc
+
                 await sio.emit(
                     "thinking_chunk",
                     {"request_id": request_id, "chunk": chunk},
-                    room=sid,
+                    room=emit_target,
                 )
+                if (
+                    assistant_message_id
+                    and pb
+                    and since_thinking_flush >= THINKING_FLUSH_CHARS
+                ):
+                    since_thinking_flush = 0
+                    await patch_project_message_with_client(
+                        pb,
+                        assistant_message_id,
+                        thinking=thinking_acc,
+                    )
                 await asyncio.sleep(THINKING_DELAY_S)
 
         doc = _build_fake_html(user_text)
         span = len(doc) // 35 if len(doc) > 35 else len(doc)
         step = max(CODE_CHUNK_MIN, min(CODE_CHUNK_MAX, span))
         for i in range(0, len(doc), step):
+            chunk = doc[i : i + step]
+            html_acc += chunk
+            since_html_flush += len(chunk)
+
+            # Keep in-memory state fresh.
+            if project_id and project_id in _active_generations:
+                _active_generations[project_id]["html_acc"] = html_acc
+
             await sio.emit(
                 "code_chunk",
-                {"request_id": request_id, "chunk": doc[i : i + step]},
-                room=sid,
+                {"request_id": request_id, "chunk": chunk},
+                room=emit_target,
             )
+            if project_id and pb and since_html_flush >= HTML_FLUSH_CHARS:
+                since_html_flush = 0
+                await patch_project_record_with_client(
+                    pb,
+                    project_id,
+                    html=html_acc,
+                    status="generating",
+                )
             await asyncio.sleep(CODE_DELAY_S)
 
-        if project_id:
-            await save_project_html(project_id, doc)
+        if assistant_message_id and pb:
+            await patch_project_message_with_client(
+                pb,
+                assistant_message_id,
+                content=reply_text,
+                thinking=thinking_acc,
+            )
+
+        if project_id and pb:
+            await patch_project_record_with_client(
+                pb,
+                project_id,
+                html=html_acc,
+                status="completed",
+            )
+        elif project_id:
+            await save_project_html(project_id, html_acc, status="completed")
+
+        # Store final reply before broadcasting so late subscribers see it.
+        if project_id and project_id in _active_generations:
+            _active_generations[project_id]["reply"] = reply_text
 
         await sio.emit(
             "assistant_reply",
-            {
-                "request_id": request_id,
-                "message": (
-                    "Streamed a fresh `index.html` from the dummy Python server. "
-                    "The preview and code panel update as chunks arrive."
-                ),
-            },
-            room=sid,
+            {"request_id": request_id, "message": reply_text},
+            room=emit_target,
         )
-        await sio.emit("generation_done", {"request_id": request_id}, room=sid)
+        await sio.emit("generation_done", {"request_id": request_id}, room=emit_target)
     except asyncio.CancelledError:
+        if assistant_message_id and pb:
+            await patch_project_message_with_client(
+                pb,
+                assistant_message_id,
+                content="Generation stopped.",
+                thinking=thinking_acc,
+            )
+        if project_id and pb:
+            await patch_project_record_with_client(
+                pb,
+                project_id,
+                html=html_acc,
+                status="cancelled",
+            )
         await sio.emit(
             "generation_stopped",
             {"request_id": request_id},
-            room=sid,
+            room=emit_target,
         )
-        logger.info("generation cancelled sid=%s request_id=%s", sid, request_id)
+        logger.info("generation cancelled request_id=%s", request_id)
         raise
     except Exception as e:
         logger.exception("generation failed")
+        if assistant_message_id and pb:
+            await patch_project_message_with_client(
+                pb,
+                assistant_message_id,
+                content=f"Generation failed: {e}",
+                thinking=thinking_acc,
+            )
+        if project_id and pb:
+            await patch_project_record_with_client(
+                pb,
+                project_id,
+                html=html_acc,
+                status="error",
+            )
         await sio.emit(
             "generation_error",
             {"request_id": request_id, "message": str(e)},
-            room=sid,
+            room=emit_target,
         )
+    finally:
+        # Clean up in-memory state regardless of how generation ended.
+        if project_id:
+            _active_generations.pop(project_id, None)
+        if cm is not None:
+            await cm.__aexit__(None, None, None)
+
+
+@sio.on("subscribe_project")
+async def subscribe_project(sid, data):
+    """Called by a reconnecting/refreshed client to rejoin a live generation stream.
+
+    Responds with a ``project_snapshot`` event containing all accumulated
+    thinking and HTML so the client can restore state, then adds the client
+    to the broadcast room so future chunks arrive in real time.
+    """
+    if not isinstance(data, dict):
+        return
+    project_id = (data.get("project_id") or "").strip()
+    if not project_id:
+        await sio.emit("project_snapshot", {"active": False}, room=sid)
+        return
+
+    gen = _active_generations.get(project_id)
+    if not gen:
+        await sio.emit("project_snapshot", {"active": False}, room=sid)
+        return
+
+    # Snapshot the current accumulated state before joining the room.
+    # After entering the room, future chunks stream to this client automatically.
+    snapshot = {
+        "active": True,
+        "request_id": gen["request_id"],
+        "thinking": gen["thinking_acc"],
+        "html": gen["html_acc"],
+        "reply": gen["reply"],
+    }
+    # Enter room first so no chunks are missed between snapshot and join.
+    await sio.enter_room(sid, f"project-{project_id}")
+    await sio.emit("project_snapshot", snapshot, room=sid)
+    logger.info(
+        "subscribe_project sid=%s project=%s thinking=%d html=%d",
+        sid,
+        project_id,
+        len(gen["thinking_acc"]),
+        len(gen["html_acc"]),
+    )
 
 
 @sio.on("user_message")
@@ -190,12 +380,15 @@ async def user_message(sid, data):
         len(text),
         project_id or "-",
     )
-    key = _task_key(sid, request_id)
+    if request_id in _generation_tasks and not _generation_tasks[request_id].done():
+        logger.warning("duplicate request_id=%s ignored", request_id)
+        return
+
     t = asyncio.create_task(_stream_generation(sid, text, request_id, project_id))
-    _generation_tasks[key] = t
+    _generation_tasks[request_id] = t
 
     def _cleanup(_: asyncio.Task) -> None:
-        _generation_tasks.pop(key, None)
+        _generation_tasks.pop(request_id, None)
 
     t.add_done_callback(_cleanup)
 
@@ -207,8 +400,7 @@ async def stop_generation(sid, data):
     request_id = data.get("request_id")
     if not request_id:
         return
-    key = _task_key(sid, request_id)
-    task = _generation_tasks.get(key)
+    task = _generation_tasks.get(request_id)
     if task and not task.done():
         task.cancel()
         logger.info("stop_generation sid=%s request_id=%s", sid, request_id)
