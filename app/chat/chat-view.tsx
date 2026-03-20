@@ -12,6 +12,7 @@ import {
   Plus,
   Rocket,
   Eye,
+  Square,
 } from 'lucide-react';
 import { Sidebar } from '@/components/Dashboard/Sidebar';
 import { NavigationBar } from '@/components/NavigationBar';
@@ -246,6 +247,26 @@ export default function ChatView({
       finalizePending();
     };
 
+    const onGenerationStopped = (payload: { request_id: string }) => {
+      if (payload.request_id !== pendingRequestIdRef.current) return;
+      const aid = pendingAssistantIdRef.current;
+      if (!aid) return;
+      setChatMessages((prev) =>
+        prev.map((m) =>
+          m.id === aid
+            ? {
+                ...m,
+                id: `assistant-${Date.now()}`,
+                content: m.content?.trim()
+                  ? `${m.content}\n\nGeneration stopped.`
+                  : 'Generation stopped.',
+              }
+            : m,
+        ),
+      );
+      finalizePending();
+    };
+
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('thinking_chunk', onThinkingChunk);
@@ -253,6 +274,7 @@ export default function ChatView({
     socket.on('assistant_reply', onAssistantReply);
     socket.on('generation_done', onGenerationDone);
     socket.on('generation_error', onGenerationError);
+    socket.on('generation_stopped', onGenerationStopped);
 
     setWsConnected(socket.connected);
     if (!socket.connected) {
@@ -268,10 +290,38 @@ export default function ChatView({
       socket.off('assistant_reply', onAssistantReply);
       socket.off('generation_done', onGenerationDone);
       socket.off('generation_error', onGenerationError);
+      socket.off('generation_stopped', onGenerationStopped);
     };
   }, [clearGenerationWatchdog]);
 
+  const handleStopGeneration = useCallback(() => {
+    const req = pendingRequestIdRef.current;
+    const aid = pendingAssistantIdRef.current;
+    if (!req || !aid) return;
+    clearGenerationWatchdog();
+    getSocket().emit('stop_generation', { request_id: req });
+    setChatMessages((prev) =>
+      prev.map((m) =>
+        m.id === aid
+          ? {
+              ...m,
+              id: `assistant-${Date.now()}`,
+              content: m.content?.trim()
+                ? `${m.content}\n\nGeneration stopped.`
+                : 'Generation stopped.',
+            }
+          : m,
+      ),
+    );
+    pendingAssistantIdRef.current = null;
+    pendingRequestIdRef.current = null;
+  }, [clearGenerationWatchdog]);
+
   const handleNewProject = () => {
+    const req = pendingRequestIdRef.current;
+    if (req) {
+      getSocket().emit('stop_generation', { request_id: req });
+    }
     clearGenerationWatchdog();
     pendingAssistantIdRef.current = null;
     pendingRequestIdRef.current = null;
@@ -454,6 +504,8 @@ export default function ChatView({
 
   const hasProject = !!projectName?.trim();
   const busy = chatMessages.some((m) => m.id.startsWith('pending-'));
+  const pendingAssistantId =
+    chatMessages.find((m) => m.id.startsWith('pending-'))?.id ?? null;
   const canStartNewProject =
     !!projectIdFromUrl ||
     chatMessages.length > 0 ||
@@ -532,7 +584,10 @@ export default function ChatView({
                 ) : null}
               </div>
             ) : (
-              <ChatMessages messages={chatMessages} />
+              <ChatMessages
+                messages={chatMessages}
+                pendingAssistantId={pendingAssistantId}
+              />
             )}
           </div>
 
@@ -613,20 +668,32 @@ export default function ChatView({
                       disabled={busy || !wsConnected}
                     />
                   </div>
-                  <Button
-                    type="button"
-                    onClick={handleSubmit}
-                    disabled={
-                      busy ||
-                      !wsConnected ||
-                      (!prompt.trim() && attachedFiles.length === 0)
-                    }
-                    variant="default"
-                    size="icon"
-                    className="rounded-full h-8 w-8 sm:h-10 sm:w-10 bg-black dark:bg-white text-white dark:text-black hover:bg-black/70 dark:hover:bg-white/70"
-                  >
-                    <ArrowUp className="h-4 w-4 sm:h-5 sm:w-5" />
-                  </Button>
+                  {busy ? (
+                    <Button
+                      type="button"
+                      onClick={handleStopGeneration}
+                      variant="outline"
+                      size="icon"
+                      title="Stop generation"
+                      className="rounded-full h-8 w-8 sm:h-10 sm:w-10 border-destructive/60 text-destructive hover:bg-destructive/10 dark:hover:bg-destructive/15"
+                    >
+                      <Square className="h-3 w-3 sm:h-3.5 sm:w-3.5 fill-current" />
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      onClick={handleSubmit}
+                      disabled={
+                        !wsConnected ||
+                        (!prompt.trim() && attachedFiles.length === 0)
+                      }
+                      variant="default"
+                      size="icon"
+                      className="rounded-full h-8 w-8 sm:h-10 sm:w-10 bg-black dark:bg-white text-white dark:text-black hover:bg-black/70 dark:hover:bg-white/70"
+                    >
+                      <ArrowUp className="h-4 w-4 sm:h-5 sm:w-5" />
+                    </Button>
+                  )}
                 </div>
               </div>
             </div>

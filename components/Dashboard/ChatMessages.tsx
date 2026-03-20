@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Collapsible,
@@ -45,7 +45,13 @@ function renderInlineContent(text: string) {
   });
 }
 
-function AssistantBlock({ message }: { message: ChatMessage }) {
+function AssistantBlock({
+  message,
+  suppressWorkingPlaceholder,
+}: {
+  message: ChatMessage;
+  suppressWorkingPlaceholder?: boolean;
+}) {
   const awaitingContent = !message.content?.trim();
 
   const [thinkingOpen, setThinkingOpen] = useState(
@@ -116,7 +122,7 @@ function AssistantBlock({ message }: { message: ChatMessage }) {
         </div>
       ) : null}
 
-      {!showContent && !showThinking ? (
+      {!suppressWorkingPlaceholder && !showContent && !showThinking ? (
         <div className="flex items-center gap-2 rounded-xl border border-border bg-muted/20 px-3 py-3">
           <span
             className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/60 animate-pulse"
@@ -148,7 +154,29 @@ function UserBubble({ message }: { message: ChatMessage }) {
   );
 }
 
-export function ChatMessages({ messages }: { messages: ChatMessage[] }) {
+function AssistantGeneratingTail() {
+  return (
+    <div
+      className="mt-2 flex items-center gap-2 text-muted-foreground"
+      role="status"
+      aria-live="polite"
+    >
+      <Loader2
+        className="h-4 w-4 shrink-0 animate-spin text-foreground/70 dark:text-foreground/60"
+        aria-hidden
+      />
+      <span className="text-xs sm:text-[13px]">Generating…</span>
+    </div>
+  );
+}
+
+export function ChatMessages({
+  messages,
+  pendingAssistantId,
+}: {
+  messages: ChatMessage[];
+  pendingAssistantId?: string | null;
+}) {
   return (
     <div className="flex flex-col gap-6 px-3 py-4 sm:gap-8 sm:px-4 sm:py-5">
       {messages.map((message) =>
@@ -161,7 +189,13 @@ export function ChatMessages({ messages }: { messages: ChatMessage[] }) {
         ) : (
           <div key={message.id} className="flex w-full justify-end">
             <div className="w-fit max-w-[80%] min-w-0">
-              <AssistantBlock message={message} />
+              <AssistantBlock
+                message={message}
+                suppressWorkingPlaceholder={pendingAssistantId === message.id}
+              />
+              {pendingAssistantId === message.id ? (
+                <AssistantGeneratingTail />
+              ) : null}
             </div>
           </div>
         ),

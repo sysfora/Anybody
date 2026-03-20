@@ -28,6 +28,12 @@ sio = socketio.AsyncServer(
 )
 app = socketio.ASGIApp(sio)
 
+_generation_tasks: dict[str, asyncio.Task] = {}
+
+
+def _task_key(sid: str, request_id: str) -> str:
+    return f"{sid}:{request_id}"
+
 
 @sio.event
 async def connect(sid, _environ):
@@ -37,6 +43,9 @@ async def connect(sid, _environ):
 @sio.event
 async def disconnect(sid):
     logger.info("client disconnected %s", sid)
+    for key, t in list(_generation_tasks.items()):
+        if key.startswith(f"{sid}:") and not t.done():
+            t.cancel()
 
 
 def _build_fake_html(user_text: str) -> str:
@@ -129,6 +138,14 @@ async def _stream_generation(sid: str, user_text: str, request_id: str) -> None:
             room=sid,
         )
         await sio.emit("generation_done", {"request_id": request_id}, room=sid)
+    except asyncio.CancelledError:
+        await sio.emit(
+            "generation_stopped",
+            {"request_id": request_id},
+            room=sid,
+        )
+        logger.info("generation cancelled sid=%s request_id=%s", sid, request_id)
+        raise
     except Exception as e:
         logger.exception("generation failed")
         await sio.emit(
@@ -145,4 +162,25 @@ async def user_message(sid, data):
     text = (data.get("text") or "").strip()
     request_id = data.get("request_id") or "unknown"
     logger.info("user_message sid=%s request_id=%s len=%s", sid, request_id, len(text))
-    asyncio.create_task(_stream_generation(sid, text, request_id))
+    key = _task_key(sid, request_id)
+    t = asyncio.create_task(_stream_generation(sid, text, request_id))
+    _generation_tasks[key] = t
+
+    def _cleanup(_: asyncio.Task) -> None:
+        _generation_tasks.pop(key, None)
+
+    t.add_done_callback(_cleanup)
+
+
+@sio.on("stop_generation")
+async def stop_generation(sid, data):
+    if not isinstance(data, dict):
+        return
+    request_id = data.get("request_id")
+    if not request_id:
+        return
+    key = _task_key(sid, request_id)
+    task = _generation_tasks.get(key)
+    if task and not task.done():
+        task.cancel()
+        logger.info("stop_generation sid=%s request_id=%s", sid, request_id)

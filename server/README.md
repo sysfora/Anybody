@@ -40,8 +40,10 @@ In `ws_app.py`, adjust `THINKING_DELAY_S`, `CODE_DELAY_S`, and chunk sizes at th
 | Direction | Event | Payload |
 |-----------|--------|---------|
 | Client → server | `user_message` | `{ text: string, request_id: string }` |
+| Client → server | `stop_generation` | `{ request_id: string }` — cancels the in-flight stream for that id |
 | Server → client | `thinking_chunk` | `{ request_id, chunk }` |
 | Server → client | `code_chunk` | `{ request_id, chunk }` |
 | Server → client | `assistant_reply` | `{ request_id, message }` |
 | Server → client | `generation_done` | `{ request_id }` |
 | Server → client | `generation_error` | `{ request_id, message }` |
+| Server → client | `generation_stopped` | `{ request_id }` — emitted when the stream was cancelled (client or disconnect) |
