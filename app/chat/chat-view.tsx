@@ -11,11 +11,6 @@ import {
 import { flushSync } from 'react-dom';
 import {
   ArrowUp,
-  Paperclip,
-  X,
-  FileText,
-  Image,
-  File,
   Plus,
   Rocket,
   Eye,
@@ -33,15 +28,9 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { VisibilityDropdown, type VisibilityOption } from '@/components/ui/visibility-dropdown';
 import { cn } from '@/lib/utils';
-import NextImage from 'next/image';
 import { useRouter } from 'next/navigation';
 import { getSocket } from '@/lib/socket';
 import pb from '@/lib/pocketbase';
-
-interface AttachedFile {
-  file: File;
-  preview?: string;
-}
 
 const deviceSizes = {
   mobile: '375px',
@@ -94,7 +83,6 @@ export default function ChatView({
 }) {
   const router = useRouter();
   const [prompt, setPrompt] = useState('');
-  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [visibility, setVisibility] = useState<VisibilityOption>('public');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [htmlSource, setHtmlSource] = useState('');
@@ -102,7 +90,6 @@ export default function ChatView({
   const [wsConnected, setWsConnected] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const codeScrollRef = useRef<HTMLDivElement>(null);
   const chatStickBottomRef = useRef(true);
@@ -117,6 +104,10 @@ export default function ChatView({
   const htmlSourceRef = useRef('');
   const projectNameRef = useRef<string | null>(null);
   const projectPbIdRef = useRef<string | null>(null);
+  // Holds a message typed on the home page that should be auto-submitted once
+  // the socket connects on the /chat page.
+  const autoSubmitMessageRef = useRef<string | null>(null);
+  const autoSubmitVisibilityRef = useRef<VisibilityOption>('public');
   const projectIdFromUrlRef = useRef<string | undefined>(projectIdFromUrl);
   const routerRef = useRef(router);
   const wsConnectedRef = useRef(false);
@@ -137,6 +128,8 @@ export default function ChatView({
     deviceSize,
     previewUrl,
     setRefreshCallback,
+    pendingSubmission,
+    clearPendingSubmission,
   } = useProject();
 
   useEffect(() => {
@@ -226,6 +219,30 @@ export default function ChatView({
       setProjectLoadStatus(null);
     }
   }, [projectIdFromUrl, setProjectName, setStatus]);
+
+  // Capture a message submitted from the home page so we can auto-send it
+  // once the socket connects. Only relevant on a fresh /chat (no project URL).
+  useEffect(() => {
+    if (projectIdFromUrl?.trim()) return;
+    const msg = pendingSubmission.message?.trim();
+    if (!msg) return;
+    autoSubmitMessageRef.current = msg;
+    autoSubmitVisibilityRef.current =
+      (pendingSubmission.visibility as VisibilityOption) ?? 'public';
+    clearPendingSubmission();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally runs once on mount
+
+  // When the socket connects, fire the pending auto-submit from the home page.
+  useEffect(() => {
+    if (!wsConnected) return;
+    const msg = autoSubmitMessageRef.current;
+    if (!msg) return;
+    autoSubmitMessageRef.current = null;
+    setVisibility(autoSubmitVisibilityRef.current);
+    void handleSubmit(msg);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsConnected]); // handleSubmit intentionally omitted — uses wsConnectedRef internally
 
   const loadedProjectKeyRef = useRef<string | null>(null);
 
@@ -620,7 +637,6 @@ export default function ChatView({
     setStatus('completed');
     setProjectLoadStatus(null);
     setPrompt('');
-    setAttachedFiles([]);
     htmlSourceRef.current = '';
     setHtmlSource('');
     setChatMessages([]);
@@ -633,10 +649,12 @@ export default function ChatView({
     ctxProjectStatus === 'generating' ||
     projectLoadStatus === 'generating';
 
-  const handleSubmit = async () => {
-    const text = prompt.trim();
-    if (!text && attachedFiles.length === 0) return;
-    if (!wsConnected) return;
+  const handleSubmit = async (textOverride?: string) => {
+    const text = (textOverride !== undefined ? textOverride : prompt).trim();
+    if (!text) return;
+    // Use the ref so this works when called directly from the connect handler
+    // before the wsConnected state update has been committed.
+    if (!wsConnectedRef.current) return;
     if (busy) return;
     if (submitInFlightRef.current) return;
 
@@ -705,11 +723,7 @@ export default function ChatView({
         });
       }
 
-      const userContent =
-        text ||
-        (attachedFiles.length
-          ? `[${attachedFiles.length} file(s) attached — demo]`
-          : '');
+      const userContent = text;
 
       const t = Date.now();
       const pendingId = `pending-${t}`;
@@ -748,7 +762,6 @@ export default function ChatView({
         ]);
       });
       setPrompt('');
-      setAttachedFiles([]);
 
       clearGenerationWatchdog();
       generationWatchdogRef.current = setTimeout(() => {
@@ -791,55 +804,6 @@ export default function ChatView({
     }
   };
 
-  const handleFileAttach = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const picked = Array.from(e.target.files || []);
-    const MAX_FILE_SIZE = 10 * 1024 * 1024;
-    const MAX_FILES = 5;
-
-    if (attachedFiles.length + picked.length > MAX_FILES) return;
-
-    const validFiles: AttachedFile[] = [];
-
-    picked.forEach((file) => {
-      if (file.size > MAX_FILE_SIZE) return;
-      const attachedFile: AttachedFile = { file };
-      if (file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          setAttachedFiles((prev) =>
-            prev.map((af) =>
-              af.file === file
-                ? { ...af, preview: ev.target?.result as string }
-                : af,
-            ),
-          );
-        };
-        reader.readAsDataURL(file);
-      }
-      validFiles.push(attachedFile);
-    });
-
-    setAttachedFiles((prev) => [...prev, ...validFiles]);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const removeFile = (index: number) => {
-    setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const getFileIcon = (file: File) => {
-    if (file.type.startsWith('image/')) {
-      return <Image className="h-4 w-4" />;
-    }
-    if (file.type.startsWith('text/')) {
-      return <FileText className="h-4 w-4" />;
-    }
-    return <File className="h-4 w-4" />;
-  };
 
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setPrompt(e.target.value);
@@ -917,27 +881,18 @@ export default function ChatView({
                   </div>
                 </div>
                 <h3 className="font-semibold text-base mb-2 text-foreground">
-                  Ready to build something amazing?
+                  What do you want to build?
                 </h3>
                 <p className="text-sm text-muted-foreground max-w-[260px] leading-relaxed">
-                  Messages are sent to the Python Socket.IO server; streamed reasoning
-                  and HTML appear in the thread and in the code / preview panes.
+                  Describe your idea — a landing page, portfolio, dashboard, or
+                  anything else — and watch it come to life.
                 </p>
-                {!wsConnected ? (
-                  <p className="mt-3 text-xs text-destructive max-w-[260px] leading-relaxed">
-                    Server offline — run{' '}
-                    <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
-                      npm run dev:ws
-                    </code>{' '}
-                    (see <code className="font-mono text-[11px]">server/README.md</code>
-                    ).
-                  </p>
-                ) : null}
+                
                 {authResolved &&
                 projectIdFromUrl?.trim() &&
                 !sessionAuthed ? (
                   <p className="mt-3 text-xs text-muted-foreground max-w-[260px] leading-relaxed">
-                    Sign in to load saved HTML for this project from your account.
+                    Sign in to load your saved project.
                   </p>
                 ) : null}
               </div>
@@ -952,44 +907,6 @@ export default function ChatView({
           </div>
 
           <div className="border-t border-border p-4 flex-shrink-0">
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              onChange={handleFileChange}
-              className="hidden"
-              accept="image/*,.pdf,.doc,.docx,.txt"
-            />
-
-            {attachedFiles.length > 0 && (
-              <div className="flex flex-wrap gap-2 mb-3">
-                {attachedFiles.map((af, index) => (
-                  <div
-                    key={index}
-                    className="relative flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-muted"
-                  >
-                    {af.preview ? (
-                      <NextImage
-                        src={af.preview}
-                        alt={af.file.name}
-                        fill
-                        className="rounded-lg object-cover"
-                      />
-                    ) : (
-                      getFileIcon(af.file)
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => removeFile(index)}
-                      className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
-                    >
-                      <X className="h-2.5 w-2.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
             <div className="relative group">
               <div className="bg-white dark:bg-black border-2 border-border rounded-2xl p-3 sm:p-4 transition-all duration-300 max-h-[200px] sm:max-h-[250px] flex flex-col">
                 <div className="flex-1 mb-3 min-h-0">
@@ -1000,7 +917,7 @@ export default function ChatView({
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
-                        handleSubmit();
+                        void handleSubmit();
                       }
                     }}
                     placeholder={
@@ -1014,14 +931,6 @@ export default function ChatView({
                 </div>
                 <div className="flex items-center justify-between flex-shrink-0">
                   <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleFileAttach}
-                      disabled={busy || !wsConnected}
-                      className="flex items-center justify-center p-1.5 sm:p-2 hover:bg-muted rounded-lg transition-colors disabled:opacity-50"
-                    >
-                      <Paperclip className="h-3 w-3 sm:h-4 sm:w-4 text-muted-foreground transition-colors" />
-                    </button>
                     <VisibilityDropdown
                       value={visibility}
                       onValueChange={setVisibility}
@@ -1042,10 +951,10 @@ export default function ChatView({
                   ) : (
                     <Button
                       type="button"
-                      onClick={handleSubmit}
+                      onClick={() => void handleSubmit()}
                       disabled={
                         !wsConnected ||
-                        (!prompt.trim() && attachedFiles.length === 0)
+                        !prompt.trim()
                       }
                       variant="default"
                       size="icon"
@@ -1074,10 +983,48 @@ export default function ChatView({
                 {htmlSource.trim() ? (
                   <CodeHighlight code={htmlSource} language="html" />
                 ) : (
-                  <p className="text-sm text-muted-foreground">
-                    Generated HTML from the server will stream here after you send a
-                    message.
-                  </p>
+                  <div className="flex h-full min-h-[320px] flex-col items-center justify-center p-6 select-none">
+                    {/* Browser window illustration */}
+                    <div className="w-full max-w-[260px] mb-6">
+                      {/* Browser chrome */}
+                      <div className="flex items-center gap-2 rounded-t-xl border border-border bg-muted/50 px-3 py-2">
+                        <span className="h-2 w-2 rounded-full bg-muted-foreground/20" />
+                        <span className="h-2 w-2 rounded-full bg-muted-foreground/20" />
+                        <span className="h-2 w-2 rounded-full bg-muted-foreground/20" />
+                        <div className="ml-2 flex-1 h-3.5 rounded-full bg-muted/70 border border-border" />
+                      </div>
+                      {/* Page layout skeleton */}
+                      <div className="rounded-b-xl border border-t-0 border-border bg-background/60 p-3 space-y-2.5">
+                        {/* Nav bar */}
+                        <div className="flex items-center gap-2">
+                          <div className="h-3 w-3 rounded bg-primary/20" />
+                          <div className="h-2 flex-1 rounded-full bg-muted/60" />
+                          <div className="h-5 w-10 rounded-full bg-primary/15 border border-primary/20" />
+                        </div>
+                        {/* Hero */}
+                        <div className="h-20 rounded-lg bg-gradient-to-br from-primary/10 via-primary/5 to-transparent border border-primary/10 flex flex-col items-center justify-center gap-1.5 p-3">
+                          <div className="h-2.5 w-3/4 rounded-full bg-primary/20" />
+                          <div className="h-2 w-1/2 rounded-full bg-primary/10" />
+                          <div className="mt-1 h-4 w-16 rounded-full bg-primary/20 border border-primary/20" />
+                        </div>
+                        {/* Cards row */}
+                        <div className="grid grid-cols-3 gap-1.5">
+                          <div className="h-8 rounded-lg bg-muted/50 border border-border" />
+                          <div className="h-8 rounded-lg bg-muted/50 border border-border" />
+                          <div className="h-8 rounded-lg bg-muted/50 border border-border" />
+                        </div>
+                        {/* Footer */}
+                        <div className="h-2.5 rounded-full bg-muted/30 border border-border" />
+                      </div>
+                    </div>
+
+                    <h3 className="text-sm font-semibold text-foreground mb-1.5">
+                      Your app will appear here
+                    </h3>
+                    <p className="text-xs text-muted-foreground/70 text-center max-w-[210px] leading-relaxed">
+                      Describe what you want to build and watch it come to life
+                    </p>
+                  </div>
                 )}
               </div>
             </div>
@@ -1106,21 +1053,33 @@ export default function ChatView({
                   />
                 </div>
               ) : (
-                <div className="flex flex-col items-center justify-center text-center p-8">
+                <div className="flex flex-col items-center justify-center text-center p-8 select-none">
+                  {/* Phone/screen mockup */}
                   <div className="relative mb-6">
-                    <div className="absolute inset-0 bg-primary/10 rounded-full blur-2xl animate-pulse" />
-                    <div className="relative flex items-center justify-center">
-                      <div className="h-20 w-20 rounded-full bg-gradient-to-br from-primary/10 to-primary/5 border border-primary/20 flex items-center justify-center">
-                        <Eye className="h-10 w-10 text-primary/60" />
+                    <div className="absolute inset-0 bg-primary/10 rounded-3xl blur-2xl animate-pulse" />
+                    <div className="relative w-28 rounded-2xl border-2 border-border bg-background overflow-hidden">
+                      {/* Status bar */}
+                      <div className="h-2 bg-muted/60" />
+                      {/* Screen content skeleton */}
+                      <div className="bg-gradient-to-b from-primary/5 to-transparent p-2 space-y-1.5">
+                        <div className="h-8 rounded-lg bg-gradient-to-br from-primary/15 to-primary/5 border border-primary/10" />
+                        <div className="h-2 w-3/4 rounded-full bg-muted/50" />
+                        <div className="h-2 w-1/2 rounded-full bg-muted/40" />
+                        <div className="grid grid-cols-2 gap-1 mt-0.5">
+                          <div className="h-5 rounded bg-muted/40 border border-border" />
+                          <div className="h-5 rounded bg-muted/40 border border-border" />
+                        </div>
+                        <div className="h-2 w-2/3 rounded-full bg-muted/30" />
                       </div>
+                      {/* Bottom bar */}
+                      <div className="h-1.5 bg-muted/30" />
                     </div>
                   </div>
                   <h3 className="font-semibold text-base mb-2 text-foreground">
-                    No preview yet
+                    Nothing to preview yet
                   </h3>
-                  <p className="text-sm text-muted-foreground max-w-[280px] leading-relaxed">
-                    Preview uses the same HTML as the code panel once the server
-                    streams a page.
+                  <p className="text-sm text-muted-foreground max-w-[240px] leading-relaxed">
+                    Start a conversation and your creation will come to life here.
                   </p>
                 </div>
               )}

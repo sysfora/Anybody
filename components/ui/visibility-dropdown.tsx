@@ -95,17 +95,17 @@ export function VisibilityDropdown({
           <ChevronDown className="h-3 w-3" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-48 bg-background border border-border">
+      <DropdownMenuContent side="top" align="start" sideOffset={6} className="w-48 bg-background border border-border text-left">
         {options.map((option) => {
           const Icon = option.icon
           return (
             <DropdownMenuItem
               key={option.value}
               onClick={() => onValueChange(option.value)}
-              className="flex items-center gap-2 px-3 py-2 cursor-pointer"
+              className="flex items-center gap-2 px-3 py-2 cursor-pointer text-left"
             >
-              <Icon className="h-4 w-4 text-muted-foreground" />
-              <div className="flex flex-col">
+              <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <div className="flex flex-col items-start">
                 <span className="text-sm font-medium">{option.label}</span>
                 <span className="text-xs text-muted-foreground">{option.description}</span>
               </div>
