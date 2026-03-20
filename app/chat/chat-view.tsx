@@ -146,7 +146,9 @@ export default function ChatView({
     projectNameRef.current = projectName;
   }, [projectName]);
 
-  useEffect(() => {
+  // Use layout-effect so the ref is always in sync with the prop before any
+  // useEffect (socket handlers, polling) reads it.
+  useLayoutEffect(() => {
     projectIdFromUrlRef.current = projectIdFromUrl;
   }, [projectIdFromUrl]);
 
@@ -384,13 +386,20 @@ export default function ChatView({
   useEffect(() => {
     if (!sessionAuthed || !projectIdFromUrl?.trim()) return;
     if (projectLoadStatus !== 'generating') return;
+    let cancelled = false;
     const id = setInterval(() => {
       void (async () => {
         const data = await fetchProjectLoadData();
+        // Discard the result if the effect was cleaned up while the fetch was
+        // in flight (e.g. user clicked "New Project" mid-poll).
+        if (cancelled) return;
         if (data) applyProjectLoad(data);
       })();
     }, 2000);
-    return () => clearInterval(id);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [
     sessionAuthed,
     projectIdFromUrl,
@@ -431,9 +440,14 @@ export default function ChatView({
     const onConnect = () => {
       wsConnectedRef.current = true;
       setWsConnected(true);
+      // Capture the project the user is on right now so we can bail if it
+      // changes while the async fetch is in flight (navigation race).
+      const expectedProject = projectIdFromUrlRef.current;
       void (async () => {
         const data = await fetchProjectLoadData();
         if (!data) return;
+        // Bail if the user navigated away while the fetch was running.
+        if (projectIdFromUrlRef.current !== expectedProject) return;
         const st = data?.project?.status;
         if (st === 'generating') {
           const pbId = data.project?.id;
@@ -651,13 +665,14 @@ export default function ChatView({
     clearGenerationWatchdog();
     pendingAssistantIdRef.current = null;
     pendingRequestIdRef.current = null;
+    // Clear all project-specific refs so stale data can never bleed into the new session.
+    projectPbIdRef.current = null;
+    loadedProjectKeyRef.current = null;
     chatStickBottomRef.current = true;
     codeStickBottomRef.current = true;
 
-    if (!projectIdFromUrl) {
-      setProjectName(null);
-    }
-
+    // Always reset project name regardless of whether a URL slug is present.
+    setProjectName(null);
     setStatus('completed');
     setProjectLoadStatus(null);
     setPrompt('');
@@ -684,10 +699,14 @@ export default function ChatView({
 
     submitInFlightRef.current = true;
     try {
-      let resolvedProjectName = projectName?.trim() || '';
       const urlName = projectIdFromUrl?.trim()
         ? decodeURIComponent(projectIdFromUrl.trim()).trim()
         : '';
+
+      // Only reuse an existing name when there is a matching URL slug.
+      // When starting fresh (/chat with no slug), always generate a new name
+      // so a stale projectName from a previous session can never bleed in.
+      let resolvedProjectName = urlName ? projectName?.trim() || '' : '';
 
       if (urlName) {
         resolvedProjectName = urlName;
