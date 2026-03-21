@@ -44,6 +44,7 @@ interface PocketBaseUser {
   plan?: string;
   stripe_id?: string;
   credits?: number;
+  credits_used?: number;
   [key: string]: unknown;
 }
 
@@ -76,20 +77,16 @@ async function updateProUserCredits(userId: string, isFirstTime: boolean = false
     await ensureAdminAuth();
 
     try {
-      const user = await pb.collection('users').getOne(userId) as PocketBaseUser;
-      const currentCredits = user.credits || 0;
-      
-      // Pro plan gets 1000 credits per month
-      const proCredits = 1000;
-      
-      // If first time, set to 1000. If monthly renewal, reset to 1000
-      const newCredits = isFirstTime ? proCredits : proCredits;
-      
+      // Pro plan: 1000 credits per month, credits_used reset to 0 on every
+      // upgrade and on every monthly renewal.
       await pb.collection('users').update(userId, {
-        credits: newCredits,
+        credits: 1000,
+        credits_used: 0,
       });
-      
-      console.log(`Updated credits for user ${userId}: ${currentCredits} -> ${newCredits} (${isFirstTime ? 'first time' : 'monthly renewal'})`);
+
+      console.log(
+        `Reset credits for user ${userId}: 1000 credits, 0 used (${isFirstTime ? 'first time pro' : 'monthly renewal'})`,
+      );
     } catch (error: unknown) {
       const pbError = error as PocketBaseError;
       if (pbError?.status === 404) {

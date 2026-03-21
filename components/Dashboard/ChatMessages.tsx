@@ -224,7 +224,14 @@ export function ChatMessages({
           </div>
         ) : (
           <div key={message.id} className="flex w-full justify-end">
-            <div className="w-fit max-w-[80%] min-w-0">
+            <div
+              className={cn(
+                'min-w-0 max-w-[80%]',
+                message.content?.trim() || message.thinking?.trim()
+                  ? 'w-full max-w-[80%]'
+                  : 'w-fit max-w-[80%]',
+              )}
+            >
               <AssistantBlock
                 message={message}
                 generationActive={generationActive}

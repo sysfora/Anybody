@@ -31,7 +31,8 @@ import { cn } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
 import { getSocket } from '@/lib/socket';
 import pb from '@/lib/pocketbase';
-import { SUBSCRIPTION_RESUME_KEY, type SubscriptionResumeData } from '@/components/SubscriptionPopup';
+import { SUBSCRIPTION_RESUME_KEY, SubscriptionPopup, type SubscriptionResumeData } from '@/components/SubscriptionPopup';
+import { AutoReloadDialog } from '@/components/AutoReloadDialog';
 import { toast } from 'sonner';
 
 const deviceSizes = {
@@ -90,6 +91,10 @@ export default function ChatView({
   const [htmlSource, setHtmlSource] = useState('');
   const [iframeKey, setIframeKey] = useState(0);
   const [wsConnected, setWsConnected] = useState(false);
+  const [showSubscriptionPopup, setShowSubscriptionPopup] = useState(false);
+  const [showAutoReloadDialog, setShowAutoReloadDialog] = useState(false);
+  // Prompt captured when a credit-check popup was shown, so we can auto-submit once resolved.
+  const blockedPromptRef = useRef<string | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -127,6 +132,7 @@ export default function ChatView({
     status: ctxProjectStatus,
     setPreviewUrl,
     viewMode,
+    setViewMode,
     deviceSize,
     previewUrl,
     setRefreshCallback,
@@ -273,7 +279,7 @@ export default function ChatView({
   const loadedProjectKeyRef = useRef<string | null>(null);
 
   const fetchProjectLoadData =
-    useCallback(async (): Promise<ProjectLoadPayload | null> => {
+    useCallback(async (): Promise<ProjectLoadPayload | null | 'not-found'> => {
       const raw = projectIdFromUrlRef.current?.trim();
       if (!raw || !sessionAuthedRef.current) return null;
       const decoded = decodeURIComponent(raw);
@@ -282,6 +288,7 @@ export default function ChatView({
           `/api/projects/load?projectName=${encodeURIComponent(decoded)}`,
           { credentials: 'include' },
         );
+        if (res.status === 404) return 'not-found';
         if (!res.ok) return null;
         return (await res.json()) as ProjectLoadPayload;
       } catch {
@@ -361,7 +368,7 @@ export default function ChatView({
     (async () => {
       const data = await fetchProjectLoadData();
       if (cancelled) return;
-      if (!data) {
+      if (!data || data === 'not-found') {
         loadedProjectKeyRef.current = null;
         return;
       }
@@ -393,7 +400,14 @@ export default function ChatView({
         // Discard the result if the effect was cleaned up while the fetch was
         // in flight (e.g. user clicked "New Project" mid-poll).
         if (cancelled) return;
-        if (data) applyProjectLoad(data);
+        if (!data || data === 'not-found') {
+          if (data === 'not-found') {
+            setProjectLoadStatus('completed');
+            setStatus('completed');
+          }
+          return;
+        }
+        applyProjectLoad(data);
       })();
     }, 2000);
     return () => {
@@ -445,7 +459,7 @@ export default function ChatView({
       const expectedProject = projectIdFromUrlRef.current;
       void (async () => {
         const data = await fetchProjectLoadData();
-        if (!data) return;
+        if (!data || data === 'not-found') return;
         // Bail if the user navigated away while the fetch was running.
         if (projectIdFromUrlRef.current !== expectedProject) return;
         const st = data?.project?.status;
@@ -575,9 +589,11 @@ export default function ChatView({
       if (!pendingAssistantIdRef.current) return;
       finalizePending();
       setIframeKey((k) => k + 1);
+      setViewMode('preview');
       void (async () => {
         const data = await fetchProjectLoadData();
-        if (data) applyProjectLoad(data, { force: true });
+        if (!data || data === 'not-found') return;
+        applyProjectLoad(data, { force: true });
       })();
     };
 
@@ -590,7 +606,8 @@ export default function ChatView({
       finalizePending();
       void (async () => {
         const data = await fetchProjectLoadData();
-        if (data) applyProjectLoad(data, { force: true });
+        if (!data || data === 'not-found') return;
+        applyProjectLoad(data, { force: true });
       })();
     };
 
@@ -600,7 +617,8 @@ export default function ChatView({
       finalizePending();
       void (async () => {
         const data = await fetchProjectLoadData();
-        if (data) applyProjectLoad(data, { force: true });
+        if (!data || data === 'not-found') return;
+        applyProjectLoad(data, { force: true });
       })();
     };
 
@@ -632,7 +650,7 @@ export default function ChatView({
       socket.off('generation_error', onGenerationError);
       socket.off('generation_stopped', onGenerationStopped);
     };
-  }, [clearGenerationWatchdog, fetchProjectLoadData, applyProjectLoad]);
+  }, [clearGenerationWatchdog, fetchProjectLoadData, applyProjectLoad, setViewMode]);
 
   const handleStopGeneration = useCallback(() => {
     const req = pendingRequestIdRef.current;
@@ -699,6 +717,34 @@ export default function ChatView({
 
     submitInFlightRef.current = true;
     try {
+      // ── Credit pre-check ────────────────────────────────────────────────────
+      // Do this before touching any state so we can bail cleanly.
+      if (pb.authStore.isValid) {
+        try {
+          const creditRes = await fetch('/api/user/check-credits');
+          if (creditRes.ok) {
+            const creditData = (await creditRes.json()) as {
+              canGenerate: boolean;
+              plan: 'free' | 'pro';
+              autoReloadEnabled: boolean;
+              availableCredits: number;
+            };
+            if (!creditData.canGenerate) {
+              blockedPromptRef.current = text;
+              submitInFlightRef.current = false;
+              if (creditData.plan === 'free') {
+                setShowSubscriptionPopup(true);
+              } else {
+                setShowAutoReloadDialog(true);
+              }
+              return;
+            }
+          }
+        } catch {
+          // Fail open — don't block generation on a network error
+        }
+      }
+      // ────────────────────────────────────────────────────────────────────────
       const urlName = projectIdFromUrl?.trim()
         ? decodeURIComponent(projectIdFromUrl.trim()).trim()
         : '';
@@ -856,13 +902,14 @@ export default function ChatView({
             insufficientCredits: boolean;
           };
 
-          if (data.autoReloaded && data.creditsAdded) {
-            toast.success(`Credits auto-reloaded — ${data.creditsAdded} credits added`);
-          } else if (data.autoReloadError) {
+          // Auto-reload: charge silently — no notification per product design.
+          // Only surface failures so the user knows to act.
+          if (data.autoReloadError) {
             toast.warning(`Auto-reload failed: ${data.autoReloadError}`);
           } else if (data.insufficientCredits) {
-            toast.warning('You are out of credits. Please top up to continue generating.');
-          } else if (data.creditsRemaining <= 100) {
+            // Shouldn't reach here (pre-check guards against it), but handle defensively.
+            toast.warning('Out of credits. Please top up to continue generating.');
+          } else if (!data.autoReloaded && data.creditsRemaining <= 100) {
             toast.info(`${data.creditsRemaining} credit${data.creditsRemaining === 1 ? '' : 's'} remaining`);
           }
         } catch {
@@ -1157,6 +1204,20 @@ export default function ChatView({
           )}
         </div>
       </div>
+
+      {/* Credit gate dialogs */}
+      <SubscriptionPopup
+        open={showSubscriptionPopup}
+        onOpenChange={setShowSubscriptionPopup}
+        reason="out_of_limits"
+        returnTo="/chat"
+        pendingPrompt={blockedPromptRef.current ?? ''}
+        pendingVisibility={visibility}
+      />
+      <AutoReloadDialog
+        open={showAutoReloadDialog}
+        onOpenChange={setShowAutoReloadDialog}
+      />
     </div>
   );
 }
