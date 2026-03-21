@@ -7,8 +7,12 @@ Run: uvicorn ws_app:app --host 0.0.0.0 --port 5000 --reload
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac as hmac_mod
 import html
 import logging
+import os
+import time
 from pathlib import Path
 
 try:
@@ -32,6 +36,32 @@ from pocketbase_save import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dummy_ws")
+
+# Shared secret between the Next.js server and this server.
+# Set WS_SECRET in both .env files. If empty, auth is skipped (dev mode).
+WS_SECRET: str = os.environ.get("WS_SECRET", "")
+
+
+def _validate_ws_token(token: str) -> bool:
+    """Validate a HMAC-SHA256 signed token issued by /api/ws-token.
+
+    Token format: "<expiresAt>.<hmac-sha256-hex>"
+    Returns True when the secret is not configured (dev mode).
+    """
+    if not WS_SECRET:
+        return True
+    try:
+        expires_at_str, mac = token.rsplit(".", 1)
+        if int(expires_at_str) < time.time():
+            return False
+        expected = hmac_mod.new(
+            WS_SECRET.encode(),
+            expires_at_str.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac_mod.compare_digest(mac, expected)
+    except Exception:
+        return False
 
 THINKING_CHARS_PER_CHUNK = 2
 THINKING_DELAY_S = 0.11
@@ -59,7 +89,11 @@ _active_generations: dict[str, dict] = {}
 
 
 @sio.event
-async def connect(sid, _environ):
+async def connect(sid, _environ, auth):
+    token = (auth or {}).get("token", "")
+    if not _validate_ws_token(token):
+        logger.warning("Unauthorized connection attempt rejected: %s", sid)
+        raise ConnectionRefusedError("Unauthorized")
     logger.info("client connected %s", sid)
 
 
