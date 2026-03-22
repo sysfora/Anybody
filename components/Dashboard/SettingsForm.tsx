@@ -1,8 +1,9 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { Pencil, Trash2, Loader2 } from "lucide-react"
+import { Pencil, Trash2, Loader2, Eye, EyeOff } from "lucide-react"
 import { useRouter } from "next/navigation"
+import { toast } from "sonner"
 import pb from "@/lib/pocketbase"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -10,7 +11,6 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Switch } from "@/components/ui/switch"
-import { useToast } from "@/hooks/use-toast"
 import {
     AlertDialog,
     AlertDialogAction,
@@ -39,28 +39,45 @@ interface UserProfile {
     stripe_id?: string
 }
 
-export function SettingsForm() {
+export function SettingsForm({ scrollTo }: { scrollTo?: string }) {
     const [user, setUser] = useState<UserProfile | null>(null)
+
+    // Profile fields
     const [name, setName] = useState("")
     const [username, setUsername] = useState("")
-    const [email, setEmail] = useState("")
     const [avatarFile, setAvatarFile] = useState<File | null>(null)
     const [avatarPreview, setAvatarPreview] = useState<string>("")
+
+    // Saved originals — used to detect unsaved changes
+    const [savedName, setSavedName] = useState("")
+    const [savedUsername, setSavedUsername] = useState("")
+
+    // Password fields
     const [newPassword, setNewPassword] = useState("")
     const [confirmPassword, setConfirmPassword] = useState("")
-    const [loading, setLoading] = useState(false)
-    const [profileLoading, setProfileLoading] = useState(true)
-    const [passwordLoading, setPasswordLoading] = useState(false)
-    const [deleteLoading, setDeleteLoading] = useState(false)
-    const [deleteConfirmation, setDeleteConfirmation] = useState("")
+    const [showNew, setShowNew] = useState(false)
+    const [showConfirm, setShowConfirm] = useState(false)
+
+    // Credits / auto-reload
     const [autoReloadEnabled, setAutoReloadEnabled] = useState(false)
     const [reloadAmount, setReloadAmount] = useState("10")
     const [reloadThreshold, setReloadThreshold] = useState("100")
-    const [creditsLoading, setCreditsLoading] = useState(false)
     const [isPro, setIsPro] = useState(false)
+
+    // Delete account
+    const [deleteConfirmation, setDeleteConfirmation] = useState("")
+    const [deleteOpen, setDeleteOpen] = useState(false)
+
+    // Loading states
+    const [profileLoading, setProfileLoading] = useState(true)
+    const [saveLoading, setSaveLoading] = useState(false)
+    const [passwordLoading, setPasswordLoading] = useState(false)
+    const [creditsLoading, setCreditsLoading] = useState(false)
     const [subscriptionLoading, setSubscriptionLoading] = useState(true)
+    const [deleteLoading, setDeleteLoading] = useState(false)
+
     const fileInputRef = useRef<HTMLInputElement>(null)
-    const { toast } = useToast()
+    const usageSectionRef = useRef<HTMLDivElement>(null)
     const router = useRouter()
 
     useEffect(() => {
@@ -69,366 +86,256 @@ export function SettingsForm() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
+    // Scroll to the requested section once the profile has loaded
+    useEffect(() => {
+        if (!scrollTo || profileLoading) return
+        const sectionMap: Record<string, React.RefObject<HTMLDivElement | null>> = {
+            credits: usageSectionRef,
+            usage: usageSectionRef,
+        }
+        const ref = sectionMap[scrollTo.toLowerCase()]
+        if (!ref?.current) return
+        // Slight delay so the scroll container has finished its layout
+        setTimeout(() => {
+            ref.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+        }, 120)
+    }, [scrollTo, profileLoading])
+
+    // ── helpers ────────────────────────────────────────────────────────────────
+
+    const getUserId = () => {
+        const id = pb.authStore.record?.id
+        if (!id) {
+            toast.error("Session expired. Please log in again.")
+            router.push("/login")
+        }
+        return id
+    }
+
+    const getInitials = (n: string) =>
+        n.split(" ").map(p => p[0]).join("").toUpperCase().slice(0, 2)
+
+    const availableCredits = (user?.credits ?? 0) - (user?.credits_used ?? 0)
+    const creditsPercent = user?.credits
+        ? Math.min((( user.credits_used ?? 0) / user.credits) * 100, 100)
+        : 0
+
+    const hasProfileChanges =
+        name !== savedName || username !== savedUsername || avatarFile !== null
+
+    // ── data fetching ──────────────────────────────────────────────────────────
+
     const fetchUserProfile = async () => {
+        const userId = pb.authStore.record?.id
+        if (!userId) { setProfileLoading(false); return }
+
         try {
-            const userId = pb.authStore.model?.id
-
-            if (!userId) {
-                toast({
-                    title: "Error",
-                    description: "Please log in to view your profile",
-                    variant: "destructive",
-                })
-                router.push('/login')
-                return
-            }
-
-            const response = await fetch('/api/user/get-profile', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+            const res = await fetch("/api/user/get-profile", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ userId }),
             })
+            if (!res.ok) throw new Error("Failed to fetch profile")
+            const data: UserProfile = await res.json()
 
-            if (!response.ok) throw new Error('Failed to fetch profile')
-            
-            const data = await response.json()
             setUser(data)
-            setName(data.name || '')
-            setUsername(data.username || '')
-            setEmail(data.email || '')
-            setAutoReloadEnabled(data.auto_reload_enabled || false)
-            setReloadAmount(String(data.reload_amount || 10))
-            setReloadThreshold(String(data.reload_threshold || 100))
-            
+            setName(data.name ?? "")
+            setUsername(data.username ?? "")
+            setSavedName(data.name ?? "")
+            setSavedUsername(data.username ?? "")
+            setAutoReloadEnabled(data.auto_reload_enabled ?? false)
+            setReloadAmount(String(data.reload_amount ?? 10))
+            setReloadThreshold(String(data.reload_threshold ?? 100))
+
             if (data.avatar) {
-                setAvatarPreview(`${process.env.NEXT_PUBLIC_POCKETBASE_URL}/api/files/users/${data.id}/${data.avatar}`)
+                setAvatarPreview(
+                    `${process.env.NEXT_PUBLIC_POCKETBASE_URL}/api/files/users/${data.id}/${data.avatar}`
+                )
             }
         } catch {
-            toast({
-                title: "Error",
-                description: "Failed to load profile",
-                variant: "destructive",
-            })
+            toast.error("Failed to load profile. Please refresh.")
         } finally {
             setProfileLoading(false)
         }
     }
 
     const fetchSubscriptionStatus = async () => {
+        const userId = pb.authStore.record?.id
+        if (!userId) { setSubscriptionLoading(false); return }
+
         try {
-            const userId = pb.authStore.model?.id
-
-            if (!userId) {
-                setSubscriptionLoading(false)
-                return
-            }
-
-            const response = await fetch('/api/subscription/status', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+            const res = await fetch("/api/subscription/status", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ userId }),
             })
-
-            if (!response.ok) {
-                setIsPro(false)
-                setSubscriptionLoading(false)
-                return
+            if (res.ok) {
+                const data = await res.json()
+                setIsPro(data.plan === "pro" && data.hasActiveSubscription)
             }
-
-            const data = await response.json()
-            setIsPro(data.plan === 'pro' && data.hasActiveSubscription)
-        } catch (error) {
-            console.error('Error fetching subscription status:', error)
+        } catch {
             setIsPro(false)
         } finally {
             setSubscriptionLoading(false)
         }
     }
 
+    // ── handlers ───────────────────────────────────────────────────────────────
+
     const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0]
-        if (file) {
-            if (file.size > 2 * 1024 * 1024) {
-                toast({
-                    title: "Error",
-                    description: "File size must be less than 2MB",
-                    variant: "destructive",
-                })
-                return
-            }
-
-            setAvatarFile(file)
-            const reader = new FileReader()
-            reader.onloadend = () => {
-                setAvatarPreview(reader.result as string)
-            }
-            reader.readAsDataURL(file)
+        if (!file) return
+        if (file.size > 2 * 1024 * 1024) {
+            toast.error("Image must be smaller than 2 MB.")
+            return
         }
+        setAvatarFile(file)
+        const reader = new FileReader()
+        reader.onloadend = () => setAvatarPreview(reader.result as string)
+        reader.readAsDataURL(file)
     }
 
     const handleProfileSave = async () => {
-        setLoading(true)
+        const userId = getUserId()
+        if (!userId) return
+        if (!hasProfileChanges) {
+            toast.info("No changes to save.")
+            return
+        }
+
+        setSaveLoading(true)
         try {
-            const userId = pb.authStore.model?.id
-
-            if (!userId) {
-                toast({
-                    title: "Error",
-                    description: "Please log in to update your profile",
-                    variant: "destructive",
-                })
-                router.push('/login')
-                return
-            }
-
             const formData = new FormData()
-            formData.append('userId', userId)
-            formData.append('name', name)
-            formData.append('username', username)
-            if (avatarFile) {
-                formData.append('avatar', avatarFile)
-            }
+            formData.append("userId", userId)
+            formData.append("name", name)
+            formData.append("username", username)
+            if (avatarFile) formData.append("avatar", avatarFile)
 
-            const response = await fetch('/api/user/update-profile', {
-                method: 'POST',
+            const res = await fetch("/api/user/update-profile", {
+                method: "POST",
                 body: formData,
             })
-
-            if (!response.ok) {
-                const error = await response.json()
-                throw new Error(error.error || 'Failed to update profile')
+            if (!res.ok) {
+                const err = await res.json()
+                throw new Error(err.error ?? "Failed to update profile")
             }
 
-            const data = await response.json()
-            setUser(data.user)
+            const data = await res.json()
+            setUser(prev => prev ? { ...prev, ...data.user } : prev)
+            setSavedName(data.user.name ?? name)
+            setSavedUsername(data.user.username ?? username)
             setAvatarFile(null)
 
-            toast({
-                title: "Success",
-                description: "Your profile has been updated successfully",
-            })
-        } catch (error: unknown) {
-            toast({
-                title: "Error",
-                description: error instanceof Error ? error.message : "Failed to update profile",
-                variant: "destructive",
-            })
+            try { await pb.collection("users").authRefresh() } catch { /* ignore */ }
+            toast.success("Profile updated successfully.")
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : "Failed to update profile.")
         } finally {
-            try 
-            {
-                await pb.collection('users').authRefresh();
-            } catch {
-            }
-            
-            setLoading(false)
+            setSaveLoading(false)
         }
     }
 
     const handlePasswordUpdate = async () => {
         if (!newPassword || !confirmPassword) {
-            toast({
-                title: "Error",
-                description: "All password fields are required",
-                variant: "destructive",
-            })
+            toast.error("Both password fields are required.")
             return
         }
-
         if (newPassword !== confirmPassword) {
-            toast({
-                title: "Error",
-                description: "Passwords do not match",
-                variant: "destructive",
-            })
+            toast.error("Passwords do not match.")
+            return
+        }
+        if (newPassword.length < 8) {
+            toast.error("Password must be at least 8 characters.")
             return
         }
 
-        if (newPassword.length < 8) {
-            toast({
-                title: "Error",
-                description: "Password must be at least 8 characters",
-                variant: "destructive",
-            })
-            return
-        }
+        const userId = getUserId()
+        if (!userId) return
 
         setPasswordLoading(true)
         try {
-            const userId = pb.authStore.model?.id
-
-            if (!userId) {
-                toast({
-                    title: "Error",
-                    description: "Please log in to update your password",
-                    variant: "destructive",
-                })
-                router.push('/login')
-                return
+            const res = await fetch("/api/user/update-password", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ userId, password: newPassword, passwordConfirm: confirmPassword }),
+            })
+            if (!res.ok) {
+                const err = await res.json()
+                throw new Error(err.error ?? "Failed to update password")
             }
-
-            const response = await fetch('/api/user/update-password', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    userId,
-                    password: newPassword,
-                    passwordConfirm: confirmPassword,
-                }),
-            })
-
-            if (!response.ok) {
-                const error = await response.json()
-                throw new Error(error.error || 'Failed to update password')
-            }
-
-            setNewPassword('')
-            setConfirmPassword('')
-
-            toast({
-                title: "Success",
-                description: "Your password has been updated successfully",
-            })
-        } catch (error: unknown) {
-            toast({
-                title: "Error",
-                description: error instanceof Error ? error.message : "Failed to update password",
-                variant: "destructive",
-            })
+            setNewPassword("")
+            setConfirmPassword("")
+            toast.success("Password changed successfully.")
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : "Failed to update password.")
         } finally {
             setPasswordLoading(false)
         }
     }
 
-    const handleDeleteAccount = async () => {
-        setDeleteLoading(true)
-        try {
-            const userId = pb.authStore.model?.id
-
-            if (!userId) {
-                toast({
-                    title: "Error",
-                    description: "Please log in to delete your account",
-                    variant: "destructive",
-                })
-                router.push('/login')
-                return
-            }
-
-            const response = await fetch('/api/user/delete-account', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId }),
-            })
-
-            if (!response.ok) {
-                const error = await response.json()
-                throw new Error(error.error || 'Failed to delete account')
-            }
-
-            pb.authStore.clear()
-
-            toast({
-                title: "Account Deleted",
-                description: "Your account has been permanently deleted",
-            })
-
-            setDeleteConfirmation("")
-
-            setTimeout(() => {
-                router.push('/login')
-            }, 1000)
-        } catch (error: unknown) {
-            toast({
-                title: "Error",
-                description: error instanceof Error ? error.message : "Failed to delete account",
-                variant: "destructive",
-            })
-            setDeleteLoading(false)
-        }
-    }
-
-    const isDeleteConfirmed = deleteConfirmation === "DELETE MY ACCOUNT"
-
     const handleCreditsUpdate = async () => {
+        const userId = getUserId()
+        if (!userId) return
+
+        const amount = parseFloat(reloadAmount)
+        const threshold = parseFloat(reloadThreshold)
+
+        if (autoReloadEnabled && amount < 10) {
+            toast.error("Reload amount must be at least $10.")
+            return
+        }
+        if (autoReloadEnabled && threshold < 100) {
+            toast.error("Reload threshold must be at least 100 credits.")
+            return
+        }
+
         setCreditsLoading(true)
         try {
-            const userId = pb.authStore.model?.id
-
-            if (!userId) {
-                toast({
-                    title: "Error",
-                    description: "Please log in to update credits settings",
-                    variant: "destructive",
-                })
-                router.push('/login')
-                return
-            }
-
-            const amount = parseFloat(reloadAmount)
-            const threshold = parseFloat(reloadThreshold)
-
-            if (autoReloadEnabled && amount < 10) {
-                toast({
-                    title: "Error",
-                    description: "Reload amount must be at least $10",
-                    variant: "destructive",
-                })
-                setCreditsLoading(false)
-                return
-            }
-
-            if (autoReloadEnabled && threshold < 100) {
-                toast({
-                    title: "Error",
-                    description: "Reload threshold must be at least 100 credits",
-                    variant: "destructive",
-                })
-                setCreditsLoading(false)
-                return
-            }
-
-            const response = await fetch('/api/user/update-credits', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    userId,
-                    autoReloadEnabled,
-                    reloadAmount: amount,
-                    reloadThreshold: threshold,
-                }),
+            const res = await fetch("/api/user/update-credits", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ userId, autoReloadEnabled, reloadAmount: amount, reloadThreshold: threshold }),
             })
-
-            if (!response.ok) {
-                const error = await response.json()
-                throw new Error(error.error || 'Failed to update credits settings')
+            if (!res.ok) {
+                const err = await res.json()
+                throw new Error(err.error ?? "Failed to update credits settings")
             }
-
-            const data = await response.json()
+            const data = await res.json()
             setUser(data.user)
-
-            toast({
-                title: "Success",
-                description: "Credits settings updated successfully",
-            })
-        } catch (error: unknown) {
-        toast({
-                title: "Error",
-                description: error instanceof Error ? error.message : "Failed to update credits settings",
-                variant: "destructive",
-            })
+            toast.success("Credits settings saved.")
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : "Failed to update credits settings.")
         } finally {
             setCreditsLoading(false)
         }
     }
 
-    const getInitials = (name: string) => {
-        return name
-            .split(' ')
-            .map(part => part[0])
-            .join('')
-            .toUpperCase()
-            .slice(0, 2)
+    const handleDeleteAccount = async () => {
+        const userId = getUserId()
+        if (!userId) return
+
+        setDeleteLoading(true)
+        try {
+            const res = await fetch("/api/user/delete-account", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ userId }),
+            })
+            if (!res.ok) {
+                const err = await res.json()
+                throw new Error(err.error ?? "Failed to delete account")
+            }
+            pb.authStore.clear()
+            toast.success("Account permanently deleted.")
+            setDeleteOpen(false)
+            router.push("/login")
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : "Failed to delete account.")
+            setDeleteLoading(false)
+        }
     }
+
+    // ── render ─────────────────────────────────────────────────────────────────
 
     if (profileLoading) {
         return (
@@ -440,203 +347,216 @@ export function SettingsForm() {
 
     return (
         <div className="space-y-6">
-            {/* Profile Settings */}
+
+            {/* ── Profile ── */}
             <Card>
                 <CardHeader>
                     <CardTitle>Profile</CardTitle>
-                    <CardDescription>Update your profile information</CardDescription>
+                    <CardDescription>Update your display name, username, and avatar.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-6">
-                    {/* Profile Picture */}
+                    {/* Avatar */}
                     <div className="flex items-center gap-4">
-                        <div className="relative">
+                        <div className="relative shrink-0">
                             {avatarPreview ? (
                                 // eslint-disable-next-line @next/next/no-img-element
                                 <img
                                     src={avatarPreview}
-                                    alt="Profile"
-                                    className="h-20 w-20 rounded-full object-cover border-2 border-border"
+                                    alt="Avatar"
+                                    className="h-20 w-20 rounded-full object-cover border border-border"
                                 />
                             ) : (
-                                <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary text-primary-foreground font-bold text-2xl border-2 border-border">
-                                    {user?.name ? getInitials(user.name) : 'U'}
-                            </div>
+                                <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary text-primary-foreground text-2xl font-bold border border-border">
+                                    {user?.name ? getInitials(user.name) : "U"}
+                                </div>
                             )}
-                            <input
-                                ref={fileInputRef}
-                                type="file"
-                                accept="image/*"
-                                className="hidden"
-                                onChange={handleAvatarChange}
-                            />
+                            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarChange} />
                             <Button
                                 size="sm"
                                 variant="outline"
-                                className="absolute bottom-0 right-0 h-8 w-8 rounded-full p-0 z-10 border-2 border-background bg-secondary shadow-sm hover:bg-secondary/80"
+                                className="absolute bottom-0 right-0 h-7 w-7 rounded-full p-0 border border-border bg-background"
                                 onClick={() => fileInputRef.current?.click()}
-                                title="Edit profile picture"
+                                title="Change avatar"
                             >
-                                <Pencil className="h-4 w-4 text-foreground" />
+                                <Pencil className="h-3.5 w-3.5" />
                             </Button>
                         </div>
                         <div>
-                            <p className="font-medium">Profile Picture</p>
-                            <p className="text-muted-foreground text-sm">JPG, PNG or GIF. Max 2MB</p>
+                            <p className="font-medium text-sm">Profile Picture</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">JPG, PNG or GIF · max 2 MB</p>
+                            {avatarFile && (
+                                <p className="text-xs text-primary mt-1">{avatarFile.name} selected</p>
+                            )}
                         </div>
                     </div>
 
-                    {/* Name */}
-                    <div className="space-y-2">
-                        <Label htmlFor="name">Name</Label>
-                        <Input
-                            id="name"
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                            disabled={loading}
-                        />
+                    <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="space-y-2">
+                            <Label htmlFor="name">Display Name</Label>
+                            <Input id="name" value={name} onChange={e => setName(e.target.value)} disabled={saveLoading} />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="username">Username</Label>
+                            <Input id="username" value={username} onChange={e => setUsername(e.target.value)} disabled={saveLoading} />
+                        </div>
                     </div>
 
-                    {/* Username */}
-                    <div className="space-y-2">
-                        <Label htmlFor="username">Username</Label>
-                        <Input
-                            id="username"
-                            value={username}
-                            onChange={(e) => setUsername(e.target.value)}
-                            disabled={loading}
-                        />
-                    </div>
-
-                    {/* Email */}
                     <div className="space-y-2">
                         <Label htmlFor="email">Email</Label>
-                        <Input
-                            id="email"
-                            type="email"
-                            value={email}
-                            disabled
-                            className="bg-muted cursor-not-allowed"
-                        />
+                        <Input id="email" type="email" value={user?.email ?? ""} disabled className="bg-muted cursor-not-allowed" />
+                        <p className="text-xs text-muted-foreground">Email cannot be changed.</p>
                     </div>
 
-                    <Button onClick={handleProfileSave} disabled={loading}>
-                        {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    <Button onClick={handleProfileSave} disabled={saveLoading || !hasProfileChanges}>
+                        {saveLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                         Save Changes
                     </Button>
                 </CardContent>
             </Card>
 
-            {/* Password */}
+            {/* ── Password ── */}
             <Card>
                 <CardHeader>
                     <CardTitle>Password</CardTitle>
-                    <CardDescription>Change your password</CardDescription>
+                    <CardDescription>Set a new password for your account.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                     <div className="space-y-2">
                         <Label htmlFor="new-password">New Password</Label>
-                        <Input
-                            id="new-password"
-                            type="password"
-                            value={newPassword}
-                            onChange={(e) => setNewPassword(e.target.value)}
-                            disabled={passwordLoading}
-                            placeholder="Enter new password"
-                        />
+                        <div className="relative">
+                            <Input
+                                id="new-password"
+                                type={showNew ? "text" : "password"}
+                                value={newPassword}
+                                onChange={e => setNewPassword(e.target.value)}
+                                disabled={passwordLoading}
+                                placeholder="Min. 8 characters"
+                                className="pr-10"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setShowNew(v => !v)}
+                                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                tabIndex={-1}
+                            >
+                                {showNew ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </button>
+                        </div>
                     </div>
+
                     <div className="space-y-2">
                         <Label htmlFor="confirm-password">Confirm New Password</Label>
-                        <Input
-                            id="confirm-password"
-                            type="password"
-                            value={confirmPassword}
-                            onChange={(e) => setConfirmPassword(e.target.value)}
-                            disabled={passwordLoading}
-                            placeholder="Confirm new password"
-                        />
+                        <div className="relative">
+                            <Input
+                                id="confirm-password"
+                                type={showConfirm ? "text" : "password"}
+                                value={confirmPassword}
+                                onChange={e => setConfirmPassword(e.target.value)}
+                                disabled={passwordLoading}
+                                placeholder="Repeat your new password"
+                                className="pr-10"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setShowConfirm(v => !v)}
+                                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                tabIndex={-1}
+                            >
+                                {showConfirm ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </button>
+                        </div>
+                        {confirmPassword && newPassword !== confirmPassword && (
+                            <p className="text-xs text-destructive">Passwords do not match.</p>
+                        )}
                     </div>
-                    <Button onClick={handlePasswordUpdate} disabled={passwordLoading}>
+
+                    <Button
+                        onClick={handlePasswordUpdate}
+                        disabled={passwordLoading || !newPassword || !confirmPassword}
+                    >
                         {passwordLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                         Update Password
                     </Button>
                 </CardContent>
             </Card>
 
-            {/* Usage */}
-            <Card>
+            {/* ── Usage ── */}
+            <Card ref={usageSectionRef}>
                 <CardHeader>
                     <CardTitle>Usage</CardTitle>
-                    <CardDescription>Your current usage and credits</CardDescription>
+                    <CardDescription>Your credit balance and auto-reload settings.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-6">
+                    {/* Credit bar */}
                     <div className="space-y-2">
                         <div className="flex justify-between text-sm">
-                            <span className="text-muted-foreground">Credits</span>
-                            <span className="font-medium">{user?.credits_used || 0}/{user?.credits || 0} credits</span>
+                            <span className="text-muted-foreground">Credits used</span>
+                            <span className="font-medium tabular-nums">
+                                {user?.credits_used ?? 0} / {user?.credits ?? 0}
+                            </span>
                         </div>
-                        <Progress value={user?.credits_used ? Math.min((user.credits_used / (user.credits || 0)) * 100, 100) : 0} />
+                        <Progress value={creditsPercent} className="h-2" />
+                        <p className="text-xs text-muted-foreground">
+                            {availableCredits} credit{availableCredits !== 1 ? "s" : ""} remaining
+                        </p>
                     </div>
-                    
+
+                    {/* Auto-reload */}
                     <div className="space-y-4 pt-4 border-t">
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-start justify-between gap-4">
                             <div className="space-y-0.5">
-                                <Label htmlFor="auto-reload" className="text-base">Enable Auto Reload</Label>
-                                <p className="text-sm text-muted-foreground">
-                                    {subscriptionLoading 
-                                        ? "Checking subscription status..."
+                                <Label htmlFor="auto-reload" className="text-sm font-medium">Auto-Reload</Label>
+                                <p className="text-xs text-muted-foreground">
+                                    {subscriptionLoading
+                                        ? "Checking plan…"
                                         : !isPro
-                                        ? "Auto-reload is only available for Pro users" 
-                                        : "Automatically reload credits when they reach the threshold"}
+                                        ? "Available on Pro plan only."
+                                        : "Top up automatically when credits fall below the threshold."}
                                 </p>
                             </div>
-                            <div className="flex items-center space-x-2">
-                                <Switch
-                                    id="auto-reload"
-                                    checked={autoReloadEnabled}
-                                    onCheckedChange={(checked) => {
-                                        if (checked && !isPro) {
-                                            toast({
-                                                title: "Pro Feature",
-                                                description: "Auto-reload is only available for Pro users. Please upgrade to Pro to use this feature.",
-                                                variant: "destructive",
-                                            })
-                                            return;
-                                        }
-                                        setAutoReloadEnabled(checked);
-                                    }}
-                                    disabled={creditsLoading || subscriptionLoading || !isPro}
+                            <Switch
+                                id="auto-reload"
+                                checked={autoReloadEnabled}
+                                onCheckedChange={checked => {
+                                    if (checked && !isPro) {
+                                        toast.error("Auto-reload is only available for Pro users.")
+                                        return
+                                    }
+                                    setAutoReloadEnabled(checked)
+                                }}
+                                disabled={creditsLoading || subscriptionLoading || !isPro}
+                            />
+                        </div>
+
+                        <div className="grid gap-4 sm:grid-cols-2">
+                            <div className="space-y-2">
+                                <Label htmlFor="reload-amount">Reload Amount ($)</Label>
+                                <Input
+                                    id="reload-amount"
+                                    type="number"
+                                    min="10"
+                                    step="1"
+                                    value={reloadAmount}
+                                    onChange={e => setReloadAmount(e.target.value)}
+                                    disabled={creditsLoading || !autoReloadEnabled}
+                                    placeholder="Min. $10"
                                 />
+                                <p className="text-xs text-muted-foreground">Minimum $10</p>
                             </div>
-                        </div>
-
-                        <div className="space-y-2">
-                            <Label htmlFor="reload-amount">Amount To Reload ($)</Label>
-                            <Input
-                                id="reload-amount"
-                                type="number"
-                                min="10"
-                                step="1"
-                                value={reloadAmount}
-                                onChange={(e) => setReloadAmount(e.target.value)}
-                                disabled={creditsLoading || !autoReloadEnabled}
-                                placeholder="Minimum $10"
-                            />
-                            <p className="text-xs text-muted-foreground">Minimum: $10</p>
-                        </div>
-
-                        <div className="space-y-2">
-                            <Label htmlFor="reload-threshold">When Credits Reach</Label>
-                            <Input
-                                id="reload-threshold"
-                                type="number"
-                                min="100"
-                                step="1"
-                                value={reloadThreshold}
-                                onChange={(e) => setReloadThreshold(e.target.value)}
-                                disabled={creditsLoading || !autoReloadEnabled}
-                                placeholder="Minimum 100 credits"
-                            />
-                            <p className="text-xs text-muted-foreground">Minimum: 100 credits</p>
+                            <div className="space-y-2">
+                                <Label htmlFor="reload-threshold">Reload When Below</Label>
+                                <Input
+                                    id="reload-threshold"
+                                    type="number"
+                                    min="100"
+                                    step="1"
+                                    value={reloadThreshold}
+                                    onChange={e => setReloadThreshold(e.target.value)}
+                                    disabled={creditsLoading || !autoReloadEnabled}
+                                    placeholder="Min. 100 credits"
+                                />
+                                <p className="text-xs text-muted-foreground">Minimum 100 credits</p>
+                            </div>
                         </div>
 
                         <Button onClick={handleCreditsUpdate} disabled={creditsLoading}>
@@ -647,14 +567,17 @@ export function SettingsForm() {
                 </CardContent>
             </Card>
 
-            {/* Delete Account */}
-            <Card className="border-red-500 border">
+            {/* ── Danger Zone ── */}
+            <Card className="border-destructive/40">
                 <CardHeader>
                     <CardTitle className="text-destructive">Danger Zone</CardTitle>
-                    <CardDescription>Permanently delete your account and all data</CardDescription>
+                    <CardDescription>Permanently delete your account and all associated data.</CardDescription>
                 </CardHeader>
                 <CardContent>
-                    <AlertDialog>
+                    <AlertDialog open={deleteOpen} onOpenChange={open => {
+                        setDeleteOpen(open)
+                        if (!open) setDeleteConfirmation("")
+                    }}>
                         <AlertDialogTrigger asChild>
                             <Button variant="destructive" disabled={deleteLoading}>
                                 <Trash2 className="mr-2 h-4 w-4" />
@@ -663,36 +586,35 @@ export function SettingsForm() {
                         </AlertDialogTrigger>
                         <AlertDialogContent>
                             <AlertDialogHeader>
-                                <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+                                <AlertDialogTitle>Delete your account?</AlertDialogTitle>
                                 <AlertDialogDescription>
-                                    This action cannot be undone. This will permanently delete your account and remove all your data from
-                                    our servers.
+                                    This is irreversible. All your projects, credits, and subscription data will be permanently removed.
                                 </AlertDialogDescription>
                             </AlertDialogHeader>
-                            <div className="py-4">
+
+                            <div className="py-2 space-y-2">
                                 <Label htmlFor="delete-confirmation" className="text-sm">
-                                    Type <span className="font-semibold">DELETE MY ACCOUNT</span> to confirm
+                                    Type <span className="font-semibold select-none">DELETE MY ACCOUNT</span> to confirm
                                 </Label>
                                 <Input
                                     id="delete-confirmation"
                                     value={deleteConfirmation}
-                                    onChange={(e) => setDeleteConfirmation(e.target.value)}
+                                    onChange={e => setDeleteConfirmation(e.target.value)}
                                     placeholder="DELETE MY ACCOUNT"
                                     disabled={deleteLoading}
-                                    className="mt-2"
+                                    autoComplete="off"
                                 />
                             </div>
+
                             <AlertDialogFooter>
-                                <AlertDialogCancel 
-                                    disabled={deleteLoading}
-                                    onClick={() => setDeleteConfirmation("")}
-                                >
-                                    Cancel
-                                </AlertDialogCancel>
+                                <AlertDialogCancel disabled={deleteLoading}>Cancel</AlertDialogCancel>
                                 <AlertDialogAction
                                     className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                    onClick={handleDeleteAccount}
-                                    disabled={deleteLoading || !isDeleteConfirmed}
+                                    onClick={e => {
+                                        e.preventDefault()
+                                        void handleDeleteAccount()
+                                    }}
+                                    disabled={deleteLoading || deleteConfirmation !== "DELETE MY ACCOUNT"}
                                 >
                                     {deleteLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                                     Delete Account
