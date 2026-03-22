@@ -189,11 +189,11 @@ export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
-    // Get the raw body as text - critical for Stripe signature verification
-    // Must use .text() to get the raw body string, not .json() which would parse it
-    // Read the body stream directly to preserve exact formatting
-    const body = await req.text();
-    
+    // Read the body as a raw Buffer — this is byte-perfect and avoids the
+    // string-encoding inconsistencies that cause "No signatures found" errors
+    // when using req.text() with certain Next.js App Router versions.
+    const rawBody = Buffer.from(await req.arrayBuffer());
+
     const headersList = await headers();
     const signature = headersList.get("stripe-signature");
 
@@ -216,7 +216,7 @@ export async function POST(req: NextRequest) {
     let event: Stripe.Event;
 
     try {
-      event = stripe.webhooks.constructEvent(body, signature, webhookSecret);
+      event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
     } catch (err) {
       console.error("Webhook signature verification failed:", err);
       return NextResponse.json(
