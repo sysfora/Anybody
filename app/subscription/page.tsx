@@ -73,15 +73,22 @@ export default function SubscriptionPage() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const userId = pb.authStore.model?.id;
+        const userId = pb.authStore.record?.id;
         if (!userId) {
           router.push("/login");
           return;
         }
 
-        // Fetch user data
-        const userData = await pb.collection("users").getOne(userId);
-        setUser(userData);
+        // Fetch user data via the server-side API (requires admin auth)
+        const profileRes = await fetch("/api/user/get-profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId }),
+        });
+        if (profileRes.ok) {
+          const userData = await profileRes.json();
+          setUser(userData);
+        }
 
         // Fetch Stripe subscription status
         const statusResponse = await fetch("/api/subscription/status", {
@@ -120,7 +127,7 @@ export default function SubscriptionPage() {
   const handleCancel = async () => {
     try {
       setPortalLoading(true);
-      const userId = pb.authStore.model?.id;
+      const userId = pb.authStore.record?.id;
 
       const response = await fetch("/api/stripe/portal", {
         method: "POST",
@@ -163,10 +170,7 @@ export default function SubscriptionPage() {
       setUpgradeLoading(true);
       setShowWarningDialog(false);
       
-      const userId = pb.authStore.model?.id;
-      const userEmail = pb.authStore.record?.email;
-
-      // Create a new checkout session for the new billing cycle
+        const userId = pb.authStore.record?.id;
       const response = await fetch("/api/stripe/checkout", {
         method: "POST",
         headers: {
@@ -218,8 +222,7 @@ export default function SubscriptionPage() {
       } else {
         // If on Free, go directly to checkout with selected billing cycle
         setUpgradeLoading(true);
-        const userId = pb.authStore.model?.id;
-        const userEmail = pb.authStore.record?.email;
+        const userId = pb.authStore.record?.id;
 
         const response = await fetch("/api/stripe/checkout", {
           method: "POST",

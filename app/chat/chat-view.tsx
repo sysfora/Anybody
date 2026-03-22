@@ -33,7 +33,29 @@ import { getSocket } from '@/lib/socket';
 import pb from '@/lib/pocketbase';
 import { SUBSCRIPTION_RESUME_KEY, SubscriptionPopup, type SubscriptionResumeData } from '@/components/SubscriptionPopup';
 import { AutoReloadDialog } from '@/components/AutoReloadDialog';
+import { clearLastChatSlug } from '@/app/chat/chat-shell';
 import { toast } from 'sonner';
+
+/** sessionStorage helpers for per-project prompt persistence */
+const promptKey = (slug: string) => `chat_prompt_${encodeURIComponent(slug)}`;
+function savePrompt(slug: string | undefined, value: string) {
+  if (!slug) return;
+  try {
+    if (value.trim()) {
+      sessionStorage.setItem(promptKey(slug), value);
+    } else {
+      sessionStorage.removeItem(promptKey(slug));
+    }
+  } catch { /* ignore */ }
+}
+function loadPrompt(slug: string | undefined): string {
+  if (!slug) return '';
+  try { return sessionStorage.getItem(promptKey(slug)) ?? ''; } catch { return ''; }
+}
+function clearPrompt(slug: string | undefined) {
+  if (!slug) return;
+  try { sessionStorage.removeItem(promptKey(slug)); } catch { /* ignore */ }
+}
 
 const deviceSizes = {
   mobile: '375px',
@@ -229,6 +251,16 @@ export default function ChatView({
       setProjectLoadStatus(null);
     }
   }, [projectIdFromUrl, setProjectName, setStatus]);
+
+  // Restore unsent prompt that was saved before the user navigated away.
+  useEffect(() => {
+    const slug = projectIdFromUrl?.trim();
+    if (!slug) return;
+    const saved = loadPrompt(slug);
+    if (saved) setPrompt(saved);
+  // Only run when the slug first becomes available.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectIdFromUrl]);
 
   // On mount, capture any pending message to auto-submit once the socket connects.
   // Sources (checked in priority order):
@@ -693,6 +725,9 @@ export default function ChatView({
     setProjectName(null);
     setStatus('completed');
     setProjectLoadStatus(null);
+    // Clear saved prompt and last-slug so returning to /chat starts fresh.
+    clearPrompt(projectIdFromUrlRef.current?.trim());
+    clearLastChatSlug();
     setPrompt('');
     htmlSourceRef.current = '';
     setHtmlSource('');
@@ -851,7 +886,7 @@ export default function ChatView({
         ]);
       });
       setPrompt('');
-
+      clearPrompt(projectIdFromUrlRef.current?.trim());
       clearGenerationWatchdog();
       generationWatchdogRef.current = setTimeout(() => {
         generationWatchdogRef.current = null;
@@ -923,7 +958,9 @@ export default function ChatView({
 
 
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setPrompt(e.target.value);
+    const value = e.target.value;
+    setPrompt(value);
+    savePrompt(projectIdFromUrl?.trim(), value);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 150)}px`;
