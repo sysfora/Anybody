@@ -60,7 +60,7 @@ interface PocketBaseError extends Error {
 async function ensureAdminAuth() {
   try {
     // Check if already authenticated
-    if (!pb.authStore.isValid || !pb.authStore.isAdmin) {
+    if (!pb.authStore.isValid || !pb.authStore.isSuperuser) {
       await pb.admins.authWithPassword(
         process.env.POCKETBASE_SUPERADMIN_EMAIL!,
         process.env.POCKETBASE_SUPERADMIN_PASSWORD!
