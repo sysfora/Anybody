@@ -1,12 +1,13 @@
 'use client';
 
+import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { Sidebar } from "@/components/Dashboard/Sidebar";
 import { NavigationBar } from "@/components/NavigationBar";
 import { SettingsForm } from "@/components/Dashboard/SettingsForm";
 import { useAuthRedirect } from "@/hooks/use-auth-redirect";
 
-export default function SettingsPage() {
+function SettingsPageContent() {
   useAuthRedirect();
   const searchParams = useSearchParams();
   const tab = searchParams.get("tab") ?? undefined;
@@ -27,5 +28,13 @@ export default function SettingsPage() {
         </div>
       </main>
     </div>
+  );
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense>
+      <SettingsPageContent />
+    </Suspense>
   );
 }

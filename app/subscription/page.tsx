@@ -178,7 +178,7 @@ export default function SubscriptionPage() {
         },
         body: JSON.stringify({
           priceId: STRIPE_PRICES[pendingBillingCycle],
-          email: userEmail,
+          email: user?.email || pb.authStore.record?.email,
           userId: userId,
         }),
       });
@@ -231,7 +231,7 @@ export default function SubscriptionPage() {
           },
           body: JSON.stringify({
             priceId: STRIPE_PRICES[billingCycle],
-            email: userEmail,
+            email: user?.email || pb.authStore.record?.email,
             userId: userId,
           }),
         });
