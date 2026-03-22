@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import pb from '@/lib/pocketbase';
-import archiver from 'archiver';
-import { Readable } from 'stream';
 import Stripe from 'stripe';
 import { getEffectiveUserId } from '@/lib/server-utils';
 import { escapePbFilterString } from '@/lib/session-user';
@@ -10,47 +8,16 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: '2025-11-17.clover',
 });
 
-async function createZip(files: Array<{ path: string; content: Buffer }>): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    const archive = archiver('zip', { zlib: { level: 9 } });
-
-    archive.on('data', (chunk: Buffer) => {
-      chunks.push(chunk);
-    });
-
-    archive.on('end', () => {
-      resolve(Buffer.concat(chunks));
-    });
-
-    archive.on('error', (err) => {
-      reject(err);
-    });
-
-    for (const file of files) {
-      archive.append(Readable.from(file.content), { name: file.path });
-    }
-
-    archive.finalize();
-  });
-}
-
 export async function POST(request: NextRequest) {
   try {
     const { username, userId: providedUserId, projectName } = await request.json();
 
     if (!projectName) {
-      return NextResponse.json(
-        { error: 'Project name is required' },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: 'Project name is required' }, { status: 400 });
     }
 
     if (!username && !providedUserId) {
-      return NextResponse.json(
-        { error: 'Username or userId is required' },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: 'Username or userId is required' }, { status: 400 });
     }
 
     await pb.admins.authWithPassword(
@@ -80,7 +47,6 @@ export async function POST(request: NextRequest) {
     }
 
     const effectiveUserId = await getEffectiveUserId(userId);
-
     const user = await pb.collection('users').getOne(effectiveUserId);
     const stripeCustomerId = user.stripe_id;
 
@@ -134,21 +100,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const zipBuffer = await createZip([
-      { path: 'index.html', content: Buffer.from(html, 'utf-8') },
-    ]);
+    const safeFile = `${String(projectName).replace(/[^\w\-+.]+/g, '_')}.html`;
+    const htmlBytes = Buffer.from(html, 'utf-8');
 
-    const safeFile = `${String(projectName).replace(/[^\w\-+.]+/g, '_')}.zip`;
-
-    return new NextResponse(zipBuffer as unknown as BodyInit, {
+    return new NextResponse(htmlBytes as unknown as BodyInit, {
       headers: {
-        'Content-Type': 'application/zip',
+        'Content-Type': 'text/html; charset=utf-8',
         'Content-Disposition': `attachment; filename="${safeFile}"`,
-        'Content-Length': zipBuffer.length.toString(),
+        'Content-Length': htmlBytes.length.toString(),
       },
     });
   } catch (error) {
-    console.error('Error creating download ZIP:', error);
+    console.error('Error creating download:', error);
     return NextResponse.json(
       {
         error: 'Internal server error',

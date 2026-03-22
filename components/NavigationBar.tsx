@@ -50,6 +50,13 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
 
   const hasProject = !!projectName && !!userId;
   const isWorking = status === 'generating' || status === 'modifying' || status === 'building' || status === 'uploading';
+
+  // /p/username/projectname — used for open-in-new-tab and as the canonical deployed URL.
+  const currentUsername = pb.authStore.record?.username as string | undefined;
+  const publicProjectUrl =
+    hasProject && currentUsername
+      ? `/p/${encodeURIComponent(currentUsername)}/${encodeURIComponent(projectName!)}`
+      : null;
   
   // Deploy dialog state
   const [showDeployDialog, setShowDeployDialog] = useState(false);
@@ -135,7 +142,7 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${projectName}.zip`;
+      a.download = `${projectName}.html`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -168,30 +175,8 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
       
       // Generate deployed URL
       if (deployed) {
-        let username = pb.authStore.model?.username;
-        
-        // If username not in auth store, fetch it
-        if (!username) {
-          try {
-            const profileResponse = await fetch('/api/user/get-profile', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ userId }),
-            });
-            if (profileResponse.ok) {
-              const profileData = await profileResponse.json();
-              username = profileData.username || userId;
-            } else {
-              username = userId;
-            }
-          } catch {
-            username = userId;
-          }
-        }
-        
-        const frontendBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
-        const url = `${frontendBaseUrl}/p/${username}/${projectName}`;
-        setDeployedUrl(url);
+        const origin = typeof window !== 'undefined' ? window.location.origin : '';
+        setDeployedUrl(publicProjectUrl ? `${origin}${publicProjectUrl}` : '');
       } else {
         setDeployedUrl('');
       }
@@ -227,34 +212,11 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
         throw new Error(error.error || 'Failed to deploy project');
       }
 
-      const data = await response.json();
+      await response.json();
       setIsDeployed(true);
-      
-      // Generate deployed URL
-      let username = pb.authStore.model?.username;
-      
-      // If username not in auth store, fetch it
-      if (!username) {
-        try {
-          const profileResponse = await fetch('/api/user/get-profile', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userId }),
-          });
-          if (profileResponse.ok) {
-            const profileData = await profileResponse.json();
-            username = profileData.username || userId;
-          } else {
-            username = userId;
-          }
-        } catch {
-          username = userId;
-        }
-      }
-      
-      const frontendBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
-      const url = `${frontendBaseUrl}/p/${username}/${projectName}`;
-      setDeployedUrl(url);
+
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+      setDeployedUrl(publicProjectUrl ? `${origin}${publicProjectUrl}` : '');
       
       toast.success("Deployed successfully", {
         description: "Your project is now live and accessible"
@@ -458,8 +420,8 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => previewUrl && window.open(previewUrl, '_blank')}
-              disabled={!hasProject}
+              onClick={() => publicProjectUrl && window.open(publicProjectUrl, '_blank')}
+              disabled={!hasProject || !publicProjectUrl}
               className="h-8 w-8 p-0"
               title="Open in new tab"
             >
@@ -724,8 +686,8 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => previewUrl && window.open(previewUrl, '_blank')}
-            disabled={!hasProject}
+            onClick={() => publicProjectUrl && window.open(publicProjectUrl, '_blank')}
+            disabled={!hasProject || !publicProjectUrl}
             className="h-8 w-8 p-0"
             title="Open in new tab"
           >
