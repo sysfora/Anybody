@@ -36,19 +36,6 @@ export async function GET(request: NextRequest) {
 
     // Format projects to match frontend expectations
     const formattedProjects = projects.items.map((project: any) => {
-      // Calculate expiry status
-      let expiresIn: string | "Never" | "Expired" = "Never";
-      if (project.expire) {
-        const expireDate = new Date(project.expire);
-        const now = new Date();
-        if (expireDate < now) {
-          expiresIn = "Expired";
-        } else {
-          const daysLeft = Math.ceil((expireDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-          expiresIn = `${daysLeft} day${daysLeft !== 1 ? 's' : ''}`;
-        }
-      }
-
       let previewUrl = null;
       if (project.preview) {
         const pbUrl = process.env.NEXT_PUBLIC_POCKETBASE_URL || 'http://127.0.0.1:8090';
@@ -59,7 +46,6 @@ export async function GET(request: NextRequest) {
         id: project.id,
         name: project.name,
         dateCreated: project.created || project.dateCreated,
-        expiresIn,
         deployed: project.deployed || false,
         visibility: project.visibility || 'public',
         username: username,

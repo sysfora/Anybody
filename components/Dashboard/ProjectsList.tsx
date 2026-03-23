@@ -3,6 +3,9 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { useProjectPagination } from '@/hooks/useProjectPagination';
 import { Edit, Download, Trash2, Plus, Eye, Loader2 } from "lucide-react"
+import { clearLastChatSlug } from "@/app/chat/chat-shell";
+import { useToast } from "@/hooks/use-toast";
+import { VisibilityDropdown, VisibilityOption } from "@/components/ui/visibility-dropdown";
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
@@ -23,7 +26,6 @@ type Project = {
     id: string
     name: string
     dateCreated: string
-    expiresIn: string | "Never" | "Expired"
     deployed: boolean
     visibility: string
     username: string
@@ -40,6 +42,8 @@ export function ProjectsList() {
         initialLimit: 12
     });
 
+    const { toast } = useToast();
+    const [updatingVisibilityId, setUpdatingVisibilityId] = useState<string | null>(null);
     const [deletingId, setDeletingId] = useState<string | null>(null);
     const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
     const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
@@ -108,6 +112,48 @@ export function ProjectsList() {
         setProjectToDelete(project)
         setDeleteDialogOpen(true)
     }
+
+    const handleVisibilityChange = async (project: Project, newVisibility: VisibilityOption) => {
+        if (!userId) return;
+        
+        setUpdatingVisibilityId(project.id);
+        try {
+            const res = await fetch("/api/projects/update-visibility", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    project_id: `${project.username}/${project.name}`,
+                    visibility: newVisibility,
+                    userId,
+                }),
+            });
+            const data = await res.json();
+            if (data.success) {
+                setDisplayProjects(prev => prev.map(p => 
+                    p.id === project.id ? { ...p, visibility: newVisibility } : p
+                ));
+                toast({
+                    title: "Success",
+                    description: `Project is now ${newVisibility}.`,
+                });
+            } else {
+                toast({
+                    title: "Update Failed",
+                    description: data.error || "Failed to update visibility.",
+                    variant: "destructive",
+                });
+            }
+        } catch (error) {
+            console.error("Error updating visibility:", error);
+            toast({
+                title: "Error",
+                description: "An unexpected error occurred.",
+                variant: "destructive",
+            });
+        } finally {
+            setUpdatingVisibilityId(null);
+        }
+    };
 
     const confirmDelete = async () => {
         if (!projectToDelete) return
@@ -204,6 +250,7 @@ export function ProjectsList() {
                 <div className="flex justify-end">
                     <Link
                         href="/chat"
+                        onClick={() => clearLastChatSlug()}
                         className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 h-8 rounded-md px-3 text-xs sm:h-9 sm:px-4 sm:py-2 sm:text-sm bg-primary text-primary-foreground hover:bg-primary/90"
                     >
                         <Plus className="h-4 w-4 sm:mr-2" />
@@ -219,6 +266,7 @@ export function ProjectsList() {
                             <p className="text-lg">No projects yet</p>
                             <Link
                                 href="/chat"
+                                onClick={() => clearLastChatSlug()}
                                 className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 h-10 px-4 py-2 bg-primary text-primary-foreground hover:bg-primary/90"
                             >
                                 <Plus className="mr-2 h-4 w-4" />
@@ -261,6 +309,19 @@ export function ProjectsList() {
                                                 </Badge>
                                             </div>
                                         )}
+
+                                        {/* Visibility Toggle Overlay */}
+                                        <div 
+                                            className="absolute top-3 right-3 z-10 transition-opacity"
+                                            onClick={(e) => e.stopPropagation()}
+                                        >
+                                            <VisibilityDropdown
+                                                value={project.visibility as VisibilityOption}
+                                                onValueChange={(val) => handleVisibilityChange(project, val)}
+                                                disabled={updatingVisibilityId === project.id}
+                                                className="bg-background/80 backdrop-blur-sm border shadow-sm hover:bg-background h-8 transition-all"
+                                            />
+                                        </div>
                                     </div>
 
                                     {/* Content Area */}
@@ -273,26 +334,6 @@ export function ProjectsList() {
                                         </div>
 
                                         <div className="mt-auto pt-4 border-t flex flex-col gap-3">
-                                            {/* Top row of footer: Expires status */}
-                                            <div className="flex items-center text-xs text-muted-foreground/80 font-medium">
-                                                {project.expiresIn === "Never" ? (
-                                                    <span className="flex items-center gap-1.5">
-                                                        <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
-                                                        Never expires
-                                                    </span>
-                                                ) : project.expiresIn === "Expired" ? (
-                                                    <span className="flex items-center gap-1.5 text-destructive">
-                                                        <span className="h-1.5 w-1.5 rounded-full bg-destructive" />
-                                                        Expired
-                                                    </span>
-                                                ) : (
-                                                    <span className="flex items-center gap-1.5">
-                                                        <span className="h-1.5 w-1.5 rounded-full bg-yellow-500" />
-                                                        Expires in {project.expiresIn}
-                                                    </span>
-                                                )}
-                                            </div>
-
                                             {/* Bottom row of footer: Actions */}
                                             <div className="flex justify-between items-center -mx-2">
                                                 <Button
