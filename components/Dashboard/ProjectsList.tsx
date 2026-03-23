@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
+import { useProjectPagination } from '@/hooks/useProjectPagination';
 import { Edit, Download, Trash2, Plus, Eye, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -31,59 +32,44 @@ type Project = {
 }
 
 export function ProjectsList() {
-    const [projects, setProjects] = useState<Project[]>([])
-    const [loading, setLoading] = useState(true)
-    const [loadError, setLoadError] = useState<string | null>(null)
-    const [deletingId, setDeletingId] = useState<string | null>(null)
-    const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
-    const [projectToDelete, setProjectToDelete] = useState<Project | null>(null)
-    const [downloadBusyId, setDownloadBusyId] = useState<string | null>(null)
+    const model = pb.authStore.isValid ? (pb.authStore.model as { id?: string }) : null;
+    const userId = model?.id;
 
-    const fetchProjects = useCallback(async () => {
-        if (!pb.authStore.isValid) {
-            setProjects([])
-            setLoading(false)
-            setLoadError(null)
-            return
-        }
-        const model = pb.authStore.model as { id?: string } | undefined
-        const userId = model?.id
-        if (!userId) {
-            setProjects([])
-            setLoading(false)
-            return
-        }
-        setLoading(true)
-        setLoadError(null)
-        try {
-            const res = await fetch(
-                `/api/projects?userId=${encodeURIComponent(userId)}&perPage=100`,
-            )
-            const data = (await res.json()) as {
-                success?: boolean
-                projects?: Project[]
-                error?: string
-            }
-            if (!res.ok) {
-                setLoadError(data.error || "Failed to load projects")
-                setProjects([])
-                return
-            }
-            setProjects(data.projects ?? [])
-        } catch {
-            setLoadError("Failed to load projects")
-            setProjects([])
-        } finally {
-            setLoading(false)
-        }
-    }, [])
+    const { items: projects, loading, hasMore, fetchMore } = useProjectPagination<Project>({
+        apiUrl: userId ? `/api/projects?userId=${encodeURIComponent(userId)}` : '',
+        initialLimit: 12
+    });
+
+    const [deletingId, setDeletingId] = useState<string | null>(null);
+    const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+    const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
+    const [downloadBusyId, setDownloadBusyId] = useState<string | null>(null);
+    const observerRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        void fetchProjects()
-        return pb.authStore.onChange(() => {
-            void fetchProjects()
-        })
-    }, [fetchProjects])
+        const observer = new IntersectionObserver(
+            (entries) => {
+                if (entries[0].isIntersecting && hasMore && !loading) {
+                    fetchMore();
+                }
+            },
+            { threshold: 0.1 }
+        );
+
+        if (observerRef.current) {
+            observer.observe(observerRef.current);
+        }
+
+        return () => observer.disconnect();
+    }, [hasMore, loading, fetchMore]);
+
+    // This component used to have a fetchProjects function for auth changes.
+    // useProjectPagination handles the fetch, but we might need to handle projects list update after delete manually.
+    const [displayProjects, setDisplayProjects] = useState<Project[]>([]);
+    
+    useEffect(() => {
+        setDisplayProjects(projects);
+    }, [projects]);
 
     const isProjectBusy = (project: Project): boolean => {
         const status = project.status?.toLowerCase()
@@ -141,7 +127,7 @@ export function ProjectsList() {
                 }),
             })
             if (res.ok) {
-                setProjects((prev) => prev.filter((p) => p.id !== projectToDelete.id))
+                setDisplayProjects((prev) => prev.filter((p) => p.id !== projectToDelete.id))
             }
         } finally {
             setDeletingId(null)
@@ -199,7 +185,7 @@ export function ProjectsList() {
         })
     }
 
-    if (!pb.authStore.isValid && !loading) {
+    if (!pb.authStore.isValid) {
         return (
             <div className="rounded-lg border border-border bg-card p-8 text-center">
                 <p className="text-muted-foreground text-sm sm:text-base mb-4">
@@ -225,15 +211,9 @@ export function ProjectsList() {
                     </Link>
                 </div>
 
-                {loadError ? (
-                    <p className="text-sm text-destructive">{loadError}</p>
-                ) : null}
+                {/* Error handling if needed */}
 
-                {loading ? (
-                    <div className="flex justify-center items-center h-64">
-                        <Loader2 className="mx-auto h-8 w-8 animate-spin text-muted-foreground" />
-                    </div>
-                ) : projects.length === 0 ? (
+                {displayProjects.length === 0 && !loading ? (
                     <div className="rounded-xl border border-dashed p-12 text-center text-muted-foreground bg-card">
                         <div className="flex flex-col items-center justify-center gap-4">
                             <p className="text-lg">No projects yet</p>
@@ -248,7 +228,7 @@ export function ProjectsList() {
                     </div>
                 ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                        {projects.map((project) => {
+                        {displayProjects.map((project) => {
                             const isBusy = isProjectBusy(project)
                             const isModifying = isProjectModifying(project)
                             const statusLabel = getProjectStatusLabel(project)
@@ -372,10 +352,11 @@ export function ProjectsList() {
                     </div>
                 )}
 
-                <div className="text-center text-sm text-muted-foreground">
-                    {!loading && projects.length > 0
-                        ? `Showing ${projects.length} project${projects.length === 1 ? '' : 's'}`
-                        : null}
+                <div ref={observerRef} className="h-24 flex items-center justify-center mt-4">
+                    {loading && hasMore && <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />}
+                    {!hasMore && displayProjects.length > 0 && (
+                        <p className="text-muted-foreground text-sm italic">Showing all your projects</p>
+                    )}
                 </div>
             </div>
 

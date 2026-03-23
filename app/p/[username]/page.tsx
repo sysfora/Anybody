@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/pagination';
 import { ExternalLink, Calendar, Eye } from 'lucide-react';
 import Link from 'next/link';
+import { UserProjectsClient } from '@/components/UserProjectsClient';
 
 interface UserProjectsPageProps {
   params: Promise<{ username: string }>;
@@ -30,6 +31,8 @@ interface PublicProjectsResponse {
   page: number;
   perPage: number;
   username: string;
+  userId: string;
+  avatar: string;
 }
 
 async function getUserPublicProjects(
@@ -100,7 +103,7 @@ export default async function UserProjectsPage({
     notFound();
   }
 
-  const { projects, totalItems, totalPages, page, username: userUsername } = data;
+  const { projects, totalItems, totalPages, page, username: userUsername, userId, avatar } = data;
 
   return (
     <div className="min-h-screen bg-background">
@@ -122,57 +125,12 @@ export default async function UserProjectsPage({
           </Card>
         ) : (
           <>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
-              {projects.map((project: RecordModel) => {
-                const previewUrl = project.preview
-                  ? `${process.env.NEXT_PUBLIC_POCKETBASE_URL || 'http://127.0.0.1:8090'}/api/files/projects/${project.id}/${project.preview}`
-                  : null;
-
-                return (
-                  <Card
-                    key={project.id}
-                    className="rounded-2xl border-border hover:border-primary/50 hover:shadow-md transition-all overflow-hidden flex flex-col group"
-                  >
-                    <Link
-                      href={`/p/${username}/${project.name as string}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex flex-col h-full"
-                    >
-                      <div className="relative aspect-video w-full overflow-hidden border-b border-border bg-muted/50">
-                        {previewUrl ? (
-                          /* eslint-disable-next-line @next/next/no-img-element */
-                          <img
-                            src={previewUrl}
-                            alt={`${project.name} preview`}
-                            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
-                          />
-                        ) : (
-                          <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-accent to-secondary/10 group-hover:opacity-80 transition-opacity" />
-                        )}
-
-                        {project.deployed && (
-                          <div className="absolute top-3 left-3 shadow-md rounded-full bg-background/80 backdrop-blur-sm px-2.5 py-1 flex items-center gap-1.5 text-xs font-semibold border border-border">
-                            <div className="h-1.5 w-1.5 rounded-full bg-green-500" />
-                            Live
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="p-5 flex flex-col flex-1">
-                        <h3 className="text-xl font-semibold line-clamp-1 mb-2">
-                          {project.name as string}
-                        </h3>
-                        <div className="flex items-center text-sm text-muted-foreground gap-1.5 mt-auto pt-1">
-                          <Calendar className="w-4 h-4" />
-                          {formatDate(project.created as string)}
-                        </div>
-                      </div>
-                    </Link>
-                  </Card>
-                );
-              })}
-            </div>
+            <UserProjectsClient 
+              projects={projects} 
+              username={userUsername} 
+              userId={userId} 
+              avatar={avatar} 
+            />
 
             {totalPages > 1 && (
               <Pagination>

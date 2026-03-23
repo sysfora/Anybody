@@ -45,6 +45,8 @@ export async function GET(
       page: projects.page,
       perPage: projects.perPage,
       username: users.items[0].username,
+      userId: users.items[0].id,
+      avatar: users.items[0].avatar || '',
     });
   } catch (error) {
     console.error('Error fetching public projects:', error);

@@ -1,12 +1,14 @@
 "use client";
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import pb from '@/lib/pocketbase';
 import { Card } from '@/components/ui/card';
 import { Calendar, ExternalLink, Loader2, Copy } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useToast } from '@/hooks/use-toast';
+
+import { useProjectPagination } from '@/hooks/useProjectPagination';
 
 interface Project {
   id: string;
@@ -20,30 +22,32 @@ interface Project {
 }
 
 export const PublicProjects = () => {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { items: projects, loading, hasMore, fetchMore } = useProjectPagination<Project>({
+    apiUrl: '/api/projects/all-public',
+    initialLimit: 12
+  });
+  
   const [remixingId, setRemixingId] = useState<string | null>(null);
   const router = useRouter();
   const { toast } = useToast();
+  const observerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const fetchProjects = async () => {
-      try {
-        const userId = pb.authStore.model?.id || '';
-        const response = await fetch(`/api/projects/all-public?userId=${userId}&limit=12`);
-        const data = await response.json();
-        if (data.success) {
-          setProjects(data.projects);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && hasMore && !loading) {
+          fetchMore();
         }
-      } catch (error) {
-        console.error('Error fetching public projects:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
+      },
+      { threshold: 0.1 }
+    );
 
-    fetchProjects();
-  }, []);
+    if (observerRef.current) {
+      observer.observe(observerRef.current);
+    }
+
+    return () => observer.disconnect();
+  }, [hasMore, loading, fetchMore]);
 
   const formatDate = (dateString: string): string => {
     const date = new Date(dateString);
@@ -98,15 +102,7 @@ export const PublicProjects = () => {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  if (projects.length === 0) {
+  if (projects.length === 0 && !loading) {
     return null;
   }
 
@@ -213,6 +209,16 @@ export const PublicProjects = () => {
             </Card>
           );
         })}
+      </div>
+
+      {/* Infinite Scroll Trigger */}
+      <div ref={observerRef} className="h-20 flex items-center justify-center mt-8">
+        {loading && hasMore && (
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        )}
+        {!hasMore && projects.length > 0 && (
+          <p className="text-muted-foreground text-sm">You&apos;ve reached the end of the showcase.</p>
+        )}
       </div>
     </section>
   );
