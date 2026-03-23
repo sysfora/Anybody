@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import pb from '@/lib/pocketbase';
 import { getEffectiveUserId } from '@/lib/server-utils';
+import Stripe from 'stripe';
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: '2025-11-17.clover',
+});
 
 export async function GET(request: NextRequest) {
   try {
@@ -158,6 +163,43 @@ export async function POST(request: NextRequest) {
 
     // Get effective user ID (owner ID if team member, otherwise user's own ID)
     const effectiveUserId = await getEffectiveUserId(userId);
+
+    // If trying to undeploy, check subscription status
+    if (action === 'undeploy') {
+      const user = await pb.collection('users').getOne(effectiveUserId);
+      const stripeCustomerId = user.stripe_id;
+
+      if (!stripeCustomerId) {
+        return NextResponse.json(
+          { error: 'Subscription required to undeploy projects' },
+          { status: 403 }
+        );
+      }
+
+      const subscriptions = await stripe.subscriptions.list({
+        customer: stripeCustomerId,
+        status: 'all',
+        limit: 1,
+      });
+
+      if (subscriptions.data.length === 0) {
+        return NextResponse.json(
+          { error: 'Subscription required to undeploy projects' },
+          { status: 403 }
+        );
+      }
+
+      const subscription = subscriptions.data[0];
+      const isActive =
+        subscription.status === 'active' || subscription.status === 'trialing';
+
+      if (!isActive) {
+        return NextResponse.json(
+          { error: 'Active subscription required to undeploy projects' },
+          { status: 403 }
+        );
+      }
+    }
 
     // Get project by effectiveUserId and projectName
     const projects = await pb.collection('projects').getList(1, 1, {

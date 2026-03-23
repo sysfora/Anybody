@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import pb from '@/lib/pocketbase';
 import { getEffectiveUserId } from '@/lib/server-utils';
+import Stripe from 'stripe';
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: '2025-11-17.clover',
+});
 
 export async function POST(request: NextRequest) {
   try {
@@ -29,6 +34,43 @@ export async function POST(request: NextRequest) {
 
     // Get effective user ID (owner ID if team member, otherwise user's own ID)
     const effectiveUserId = await getEffectiveUserId(userId);
+
+    // If trying to set to private, check subscription status
+    if (visibility === 'private') {
+      const user = await pb.collection('users').getOne(effectiveUserId);
+      const stripeCustomerId = user.stripe_id;
+
+      if (!stripeCustomerId) {
+        return NextResponse.json(
+          { success: false, error: 'Subscription required to make projects private' },
+          { status: 403 }
+        );
+      }
+
+      const subscriptions = await stripe.subscriptions.list({
+        customer: stripeCustomerId,
+        status: 'all',
+        limit: 1,
+      });
+
+      if (subscriptions.data.length === 0) {
+        return NextResponse.json(
+          { success: false, error: 'Subscription required to make projects private' },
+          { status: 403 }
+        );
+      }
+
+      const subscription = subscriptions.data[0];
+      const isActive =
+        subscription.status === 'active' || subscription.status === 'trialing';
+
+      if (!isActive) {
+        return NextResponse.json(
+          { success: false, error: 'Active subscription required to make projects private' },
+          { status: 403 }
+        );
+      }
+    }
 
     // Parse project_id to get identifier and project_name
     const parts = project_id.split('/');

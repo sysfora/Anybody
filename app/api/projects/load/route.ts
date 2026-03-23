@@ -80,7 +80,7 @@ export async function GET(request: NextRequest) {
       html?: string;
     };
 
-    const html =
+    let html =
       typeof project.html === 'string' && project.html.trim() ? project.html : '';
 
     const safeProjectId = escapePbFilterString(project.id);
@@ -148,21 +148,34 @@ export async function GET(request: NextRequest) {
 
     messages = messages.map((m) => ({ ...m }));
     let synthesizedLastAssistant = false;
+    let extractedHtml = '';
+
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role !== 'assistant') continue;
+      
+      if (!html && !extractedHtml) {
+        const match = messages[i].content.match(/```(?:html)?\s*(<!DOCTYPE html>[\s\S]*?|<html>[\s\S]*?)```/i) || 
+                      messages[i].content.match(/```(?:html)?\s*([\s\S]*?)```/i);
+        if (match && match[1]) {
+          extractedHtml = match[1].trim();
+        }
+      }
+
       if (
         !messages[i].content.trim() &&
-        html &&
-        htmlLooksSubstantial(html)
+        (html || extractedHtml) &&
+        htmlLooksSubstantial(html || extractedHtml)
       ) {
         messages[i] = {
           ...messages[i],
-          content: synthesizeAssistantSummaryFromHtml(html),
+          content: synthesizeAssistantSummaryFromHtml(html || extractedHtml),
         };
         synthesizedLastAssistant = true;
       }
       break;
     }
+    
+    html = html || extractedHtml;
 
     let responseStatus = project.status ?? 'completed';
     if (synthesizedLastAssistant && responseStatus === 'generating') {

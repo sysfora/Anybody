@@ -197,21 +197,15 @@ export async function GET(
           loggedInUserId = pb.authStore.model?.id || null;
         } catch {
           // Token invalid or verification failed
-          return createErrorPage(
-            401,
-            'Unauthorized',
-            'Invalid or expired token. Please log in again.'  
-          );
+          // Just fall back to anonymous, don't block access completely
+          pb.authStore.clear();
+          loggedInUserId = null;
         }
       }
     } catch {
       // If there's any error, treat as not logged in
+      pb.authStore.clear();
       loggedInUserId = null;
-      return createErrorPage(
-        500,
-        'Unauthorized',
-        'Failed to verify user authentication. Please log in again.'
-      );
     }
 
     await pb.admins.authWithPassword(
@@ -222,6 +216,7 @@ export async function GET(
     const safeProjectName = escapePbFilterString(projectName);
 
     type VerifiedProjectRow = {
+      id?: string;
       html?: string;
       visibility?: string;
       deployed?: boolean;
@@ -286,12 +281,37 @@ export async function GET(
     const isPrimaryHtml =
       filePath === 'index.html' || !pathSegments[2];
 
-    const storedHtml =
+    let storedHtml =
       verifiedProject &&
       typeof verifiedProject.html === 'string' &&
       verifiedProject.html.trim()
         ? verifiedProject.html
         : '';
+
+    // If HTML wasn't saved to the project record, try to recover it from the latest message
+    if (!storedHtml && verifiedProject?.id) {
+      try {
+        const safeProjectId = escapePbFilterString(verifiedProject.id);
+        const messageRows = await pb.collection('project_messages').getFullList({
+          filter: `project = "${safeProjectId}"`,
+          sort: '-created',
+        });
+        
+        for (const row of messageRows) {
+          if (row.role === 'assistant') {
+            const content = (row.content as string) || '';
+            const match = content.match(/```(?:html)?\s*(<!DOCTYPE html>[\s\S]*?|<html>[\s\S]*?)```/i) || 
+                          content.match(/```(?:html)?\s*([\s\S]*?)```/i);
+            if (match && match[1]) {
+              storedHtml = match[1].trim();
+              break;
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to parse messages for fallback HTML:', err);
+      }
+    }
 
     const cacheHeaders = {
       'Cache-Control':

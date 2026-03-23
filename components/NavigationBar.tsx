@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useProject } from '@/context/ProjectContext';
 import { toast } from 'sonner';
@@ -502,30 +503,37 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
             <div className="space-y-4">
               <div className="space-y-2">
                 <label className="text-sm font-medium text-muted-foreground">Your project is live at:</label>
-                <div className="flex items-center justify-between p-3 border border-border rounded-lg bg-muted/30">
-                  <a
-                    href={deployedUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-primary hover:underline truncate mr-4 font-medium transition-colors"
-                  >
-                    {deployedUrl}
-                  </a>
+                <div className="flex items-center gap-2">
+                  <Input 
+                    readOnly 
+                    value={deployedUrl} 
+                    className="flex-1 font-mono text-sm" 
+                  />
                   <Button
                     variant="outline"
-                    size="sm"
+                    size="icon"
+                    onClick={() => window.open(deployedUrl, '_blank', 'noopener,noreferrer')}
+                    disabled={!deployedUrl}
+                    title="Open in new tab"
+                    className="shrink-0"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="icon"
                     onClick={handleCopyLink}
                     disabled={isCopying || !deployedUrl}
-                    className="gap-2 shrink-0"
+                    title={copied ? "Copied" : "Copy link"}
+                    className="shrink-0"
                   >
                     {isCopying ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : copied ? (
-                      <Check className="h-4 w-4" />
+                      <Check className="h-4 w-4 text-green-500" />
                     ) : (
                       <Copy className="h-4 w-4" />
                     )}
-                    {copied ? 'Copied' : 'Copy'}
                   </Button>
                 </div>
               </div>
@@ -771,30 +779,37 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
             <div className="space-y-4">
               <div className="space-y-2">
                 <label className="text-sm font-medium text-muted-foreground">Your project is live at:</label>
-                <div className="flex items-center justify-between p-3 border border-border rounded-lg bg-muted/30">
-                  <a
-                    href={deployedUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-primary hover:underline truncate mr-4 font-medium transition-colors"
-                  >
-                    {deployedUrl}
-                  </a>
+                <div className="flex items-center gap-2">
+                  <Input 
+                    readOnly 
+                    value={deployedUrl} 
+                    className="flex-1 font-mono text-sm" 
+                  />
                   <Button
                     variant="outline"
-                    size="sm"
+                    size="icon"
+                    onClick={() => window.open(deployedUrl, '_blank', 'noopener,noreferrer')}
+                    disabled={!deployedUrl}
+                    title="Open in new tab"
+                    className="shrink-0"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="icon"
                     onClick={handleCopyLink}
                     disabled={isCopying || !deployedUrl}
-                    className="gap-2 shrink-0"
+                    title={copied ? "Copied" : "Copy link"}
+                    className="shrink-0"
                   >
                     {isCopying ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : copied ? (
-                      <Check className="h-4 w-4" />
+                      <Check className="h-4 w-4 text-green-500" />
                     ) : (
                       <Copy className="h-4 w-4" />
                     )}
-                    {copied ? 'Copied' : 'Copy'}
                   </Button>
                 </div>
               </div>
