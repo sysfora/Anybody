@@ -16,6 +16,7 @@ import { checkProjectLimit, canCreatePrivateProject } from "@/lib/subscription";
 import pb from "@/lib/pocketbase";
 import { useToast } from "@/hooks/use-toast";
 import { useProject } from "@/context/ProjectContext";
+import { PublicProjects } from "@/components/Home/PublicProjects";
 
 export const Content = () => {
     const router = useRouter();
@@ -187,7 +188,7 @@ export const Content = () => {
     }
 
     return (
-        <section className="relative z-10 flex items-center justify-center h-full px-4 sm:px-6 md:px-8 py-8 overflow-hidden">
+        <section id="hero" className="relative z-10 flex items-center justify-center min-h-[90vh] px-4 sm:px-6 md:px-8 py-12 pt-24 overflow-hidden">
             <div className="relative z-10 max-w-4xl mx-auto text-center space-y-6 sm:space-y-5">
                 {/* Logo */}
                 <div className="flex justify-center animate-[float_6s_ease-in-out_infinite]">
@@ -271,10 +272,11 @@ export const Home = () => {
     return (
         <>
             <Background />
-            <div className="h-screen flex flex-col overflow-hidden">
+            <div className="min-h-screen flex flex-col relative overflow-x-hidden">
                 <Navbar />
-                <main className="flex-1 overflow-hidden">
+                <main className="flex-1 bg-transparent pb-20">
                     <Content />
+                    <PublicProjects />
                 </main>
                 <Footer />
             </div>
