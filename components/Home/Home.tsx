@@ -34,6 +34,17 @@ export const Content = () => {
     useEffect(() => {
         setMounted(true);
 
+        const checkSubscription = async () => {
+            const userId = pb.authStore.model?.id;
+            if (userId) {
+                const canCreate = await canCreatePrivateProject(userId);
+                if (canCreate) {
+                    setVisibility("private");
+                }
+            }
+        };
+        checkSubscription();
+
         // Restore prompt typed before the subscription popup interrupted the flow.
         try {
             const raw = localStorage.getItem(SUBSCRIPTION_RESUME_KEY);

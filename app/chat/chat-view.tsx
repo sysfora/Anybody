@@ -117,6 +117,8 @@ export default function ChatView({
   const [wsConnected, setWsConnected] = useState(false);
   const [showSubscriptionPopup, setShowSubscriptionPopup] = useState(false);
   const [showAutoReloadDialog, setShowAutoReloadDialog] = useState(false);
+  const [isSubscribed, setIsSubscribed] = useState<boolean | null>(null);
+  const [subscriptionReason, setSubscriptionReason] = useState<"private_project" | "out_of_limits">("out_of_limits");
   // Prompt captured when a credit-check popup was shown, so we can auto-submit once resolved.
   const blockedPromptRef = useRef<string | null>(null);
 
@@ -175,6 +177,38 @@ export default function ChatView({
   useEffect(() => {
     projectNameRef.current = projectName;
   }, [projectName]);
+
+  // Check subscription to set default visibility
+  useEffect(() => {
+    const checkSub = async () => {
+      const userId = pb.authStore.record?.id;
+      if (!userId) return;
+
+      try {
+        const res = await fetch("/api/subscription/status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const sub = !!data.hasActiveSubscription;
+          setIsSubscribed(sub);
+          
+          // If subscribed and starting a new project (no projectIdFromUrl), default to private
+          if (sub && !projectIdFromUrl) {
+            setVisibility('private');
+          }
+        }
+      } catch (err) {
+        console.error("Failed to check sub:", err);
+      }
+    };
+    
+    if (pb.authStore.isValid) {
+      checkSub();
+    }
+  }, [projectIdFromUrl]);
 
   // Use layout-effect so the ref is always in sync with the prop before any
   // useEffect (socket handlers, polling) reads it.
@@ -1027,6 +1061,26 @@ export default function ChatView({
     }
   };
 
+  const handleVisibilityChange = async (newVisibility: VisibilityOption) => {
+    if (newVisibility === "private") {
+      const userId = pb.authStore.record?.id;
+      if (!userId) return;
+
+      const res = await fetch("/api/subscription/can-create-private", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
+      });
+      const data = await res.json();
+      if (!data.canCreatePrivate) {
+        setSubscriptionReason("private_project");
+        setShowSubscriptionPopup(true);
+        return;
+      }
+    }
+    setVisibility(newVisibility);
+  };
+
   const hasProject = !!projectName?.trim();
   const pendingAssistantId =
     chatMessages.find((m) => m.id.startsWith('pending-'))?.id ?? null;
@@ -1147,7 +1201,7 @@ export default function ChatView({
                   <div className="flex items-center gap-2">
                     <VisibilityDropdown
                       value={visibility}
-                      onValueChange={setVisibility}
+                      onValueChange={handleVisibilityChange}
                       disabled={busy || !wsConnected}
                     />
                   </div>
@@ -1309,9 +1363,9 @@ export default function ChatView({
       <SubscriptionPopup
         open={showSubscriptionPopup}
         onOpenChange={setShowSubscriptionPopup}
-        reason="out_of_limits"
-        returnTo="/chat"
-        pendingPrompt={blockedPromptRef.current ?? ''}
+        reason={subscriptionReason}
+        returnTo={`/chat/${projectIdFromUrl ?? ''}`}
+        pendingPrompt={blockedPromptRef.current ?? prompt ?? ''}
         pendingVisibility={visibility}
       />
       <AutoReloadDialog

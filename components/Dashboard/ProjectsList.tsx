@@ -21,6 +21,7 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { SubscriptionPopup } from "@/components/SubscriptionPopup";
 
 type Project = {
     id: string
@@ -45,6 +46,9 @@ export function ProjectsList() {
     const { toast } = useToast();
     const [updatingVisibilityId, setUpdatingVisibilityId] = useState<string | null>(null);
     const [deletingId, setDeletingId] = useState<string | null>(null);
+    const [showSubscriptionPopup, setShowSubscriptionPopup] = useState(false);
+    const [subscriptionReason, setSubscriptionReason] = useState<"private_project" | "out_of_limits">("out_of_limits");
+    const [pendingProject, setPendingProject] = useState<Project | null>(null);
     const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
     const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
     const [downloadBusyId, setDownloadBusyId] = useState<string | null>(null);
@@ -116,6 +120,21 @@ export function ProjectsList() {
     const handleVisibilityChange = async (project: Project, newVisibility: VisibilityOption) => {
         if (!userId) return;
         
+        if (newVisibility === "private") {
+            const res = await fetch("/api/subscription/can-create-private", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ userId }),
+            });
+            const data = await res.json();
+            if (!data.canCreatePrivate) {
+                setPendingProject(project);
+                setSubscriptionReason("private_project");
+                setShowSubscriptionPopup(true);
+                return;
+            }
+        }
+
         setUpdatingVisibilityId(project.id);
         try {
             const res = await fetch("/api/projects/update-visibility", {
@@ -420,6 +439,15 @@ export function ProjectsList() {
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
+
+            <SubscriptionPopup
+                open={showSubscriptionPopup}
+                onOpenChange={setShowSubscriptionPopup}
+                reason={subscriptionReason}
+                returnTo="/projects"
+                pendingPrompt=""
+                pendingVisibility="private"
+            />
         </>
     )
 }
