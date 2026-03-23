@@ -49,6 +49,12 @@ export async function GET(request: NextRequest) {
         }
       }
 
+      let previewUrl = null;
+      if (project.preview) {
+        const pbUrl = process.env.NEXT_PUBLIC_POCKETBASE_URL || 'http://127.0.0.1:8090';
+        previewUrl = `${pbUrl}/api/files/projects/${project.id}/${project.preview}`;
+      }
+
       return {
         id: project.id,
         name: project.name,
@@ -57,7 +63,8 @@ export async function GET(request: NextRequest) {
         deployed: project.deployed || false,
         visibility: project.visibility || 'public',
         username: username,
-        status: project.status || 'completed', // Status from PocketBase: generating, modifying, building, uploading, completed, error, cancelled
+        status: project.status || 'completed',
+        previewUrl,
       };
     });
 

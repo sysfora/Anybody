@@ -78,6 +78,7 @@ export async function GET(request: NextRequest) {
       status?: string;
       deployed?: boolean;
       html?: string;
+      preview?: string;
     };
 
     let html =
@@ -190,6 +191,7 @@ export async function GET(request: NextRequest) {
         visibility: project.visibility ?? 'public',
         status: responseStatus,
         deployed: project.deployed ?? false,
+        preview: project.preview,
       },
       html,
       messages,

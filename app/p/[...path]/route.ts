@@ -191,7 +191,7 @@ export async function GET(
     let loggedInUserId: string | null = null;
     try {
       if (token && model) {
-       try {
+        try {
           await pb.authStore.save(token, model);
           await pb.collection("users").authRefresh();
           loggedInUserId = pb.authStore.model?.id || null;
@@ -283,8 +283,8 @@ export async function GET(
 
     let storedHtml =
       verifiedProject &&
-      typeof verifiedProject.html === 'string' &&
-      verifiedProject.html.trim()
+        typeof verifiedProject.html === 'string' &&
+        verifiedProject.html.trim()
         ? verifiedProject.html
         : '';
 
@@ -296,12 +296,12 @@ export async function GET(
           filter: `project = "${safeProjectId}"`,
           sort: '-created',
         });
-        
+
         for (const row of messageRows) {
           if (row.role === 'assistant') {
             const content = (row.content as string) || '';
-            const match = content.match(/```(?:html)?\s*(<!DOCTYPE html>[\s\S]*?|<html>[\s\S]*?)```/i) || 
-                          content.match(/```(?:html)?\s*([\s\S]*?)```/i);
+            const match = content.match(/```(?:html)?\s*(<!DOCTYPE html>[\s\S]*?|<html>[\s\S]*?)```/i) ||
+              content.match(/```(?:html)?\s*([\s\S]*?)```/i);
             if (match && match[1]) {
               storedHtml = match[1].trim();
               break;
@@ -322,12 +322,52 @@ export async function GET(
 
     if (isPrimaryHtml && storedHtml) {
       const publicPath = `${username}/${projectName}`;
+      const isolationSnippet = `<meta name="color-scheme" content="light"><style>:root { color-scheme: light !important; } body { background-color: white; color: black; margin: 0; min-height: 100vh; }</style>`;
+      let isolatedHtml = storedHtml;
+      if (storedHtml.includes('<head>')) {
+        isolatedHtml = storedHtml.replace('<head>', '<head>' + isolationSnippet);
+      } else if (storedHtml.includes('<html>')) {
+          isolatedHtml = storedHtml.replace('<html>', '<html><head>' + isolationSnippet + '</head>');
+      } else {
+        isolatedHtml = isolationSnippet + storedHtml;
+      }
       const processedContent = rewriteAbsolutePaths(
-        storedHtml,
+        isolatedHtml,
         'text/html',
         publicPath,
       );
-      return new NextResponse(processedContent, {
+
+      const isRaw = searchParams.get('raw') === 'true';
+
+      if (isRaw) {
+        return new NextResponse(processedContent, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            ...cacheHeaders,
+          },
+        });
+      }
+
+      // Return iframe wrapper for absolute isolation
+      const rawUrl = `${request.nextUrl.pathname}${request.nextUrl.search ? request.nextUrl.search + '&' : '?'}raw=true`;
+      const wrapperHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${projectName} - Preview</title>
+  <style>
+    body, html { margin: 0; padding: 0; height: 100vh; width: 100vw; overflow: hidden; background-color: white; color-scheme: light; }
+    iframe { border: none; width: 100%; height: 100%; display: block; background-color: white; }
+  </style>
+</head>
+<body>
+  <iframe src="${rawUrl}" title="${projectName} preview"></iframe>
+</body>
+</html>`;
+
+      return new NextResponse(wrapperHtml, {
         status: 200,
         headers: {
           'Content-Type': 'text/html; charset=utf-8',

@@ -42,7 +42,7 @@ async function getUserPublicProjects(
     const host = headersList.get('host') || 'localhost:3000';
     const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
     const baseUrl = `${protocol}://${host}`;
-    
+
     const response = await fetch(
       `${baseUrl}/api/users/${username}/public-projects?page=${page}&perPage=${perPage}`,
       {
@@ -122,46 +122,56 @@ export default async function UserProjectsPage({
           </Card>
         ) : (
           <>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
-              {projects.map((project: RecordModel) => (
-                <Card
-                  key={project.id}
-                  className="rounded-2xl border-border hover:border-primary/50 transition-colors"
-                >
-                  <CardHeader className="pb-4">
-                    <div className="flex items-start justify-between mb-2">
-                      <CardTitle className="text-xl font-semibold line-clamp-1">
-                        {project.name as string}
-                      </CardTitle>
-                      {project.deployed && (
-                        <Badge variant="outline" className="ml-2 shrink-0">
-                          <Eye className="w-3 h-3 mr-1" />
-                          Live
-                        </Badge>
-                      )}
-                    </div>
-                    <CardDescription className="flex items-center gap-2 text-xs">
-                      <Calendar className="w-3 h-3" />
-                      {formatDate(project.created as string)}
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <Link 
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+              {projects.map((project: RecordModel) => {
+                const previewUrl = project.preview
+                  ? `${process.env.NEXT_PUBLIC_POCKETBASE_URL || 'http://127.0.0.1:8090'}/api/files/projects/${project.id}/${project.preview}`
+                  : null;
+
+                return (
+                  <Card
+                    key={project.id}
+                    className="rounded-2xl border-border hover:border-primary/50 hover:shadow-md transition-all overflow-hidden flex flex-col group"
+                  >
+                    <Link
                       href={`/p/${username}/${project.name as string}`}
                       target="_blank"
                       rel="noopener noreferrer"
+                      className="flex flex-col h-full"
                     >
-                      <Button
-                        variant="outline"
-                        className="w-full rounded-xl border-border"
-                      >
-                        View Project
-                        <ExternalLink className="w-4 h-4 ml-2" />
-                      </Button>
+                      <div className="relative aspect-video w-full overflow-hidden border-b border-border bg-muted/50">
+                        {previewUrl ? (
+                          /* eslint-disable-next-line @next/next/no-img-element */
+                          <img
+                            src={previewUrl}
+                            alt={`${project.name} preview`}
+                            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                          />
+                        ) : (
+                          <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-accent to-secondary/10 group-hover:opacity-80 transition-opacity" />
+                        )}
+
+                        {project.deployed && (
+                          <div className="absolute top-3 left-3 shadow-md rounded-full bg-background/80 backdrop-blur-sm px-2.5 py-1 flex items-center gap-1.5 text-xs font-semibold border border-border">
+                            <div className="h-1.5 w-1.5 rounded-full bg-green-500" />
+                            Live
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="p-5 flex flex-col flex-1">
+                        <h3 className="text-xl font-semibold line-clamp-1 mb-2">
+                          {project.name as string}
+                        </h3>
+                        <div className="flex items-center text-sm text-muted-foreground gap-1.5 mt-auto pt-1">
+                          <Calendar className="w-4 h-4" />
+                          {formatDate(project.created as string)}
+                        </div>
+                      </div>
                     </Link>
-                  </CardContent>
-                </Card>
-              ))}
+                  </Card>
+                );
+              })}
             </div>
 
             {totalPages > 1 && (
@@ -177,34 +187,34 @@ export default async function UserProjectsPage({
 
                   {(() => {
                     const pages: (number | 'ellipsis')[] = [];
-                    
+
                     if (totalPages <= 7) {
                       for (let i = 1; i <= totalPages; i++) {
                         pages.push(i);
                       }
                     } else {
                       pages.push(1);
-                      
+
                       if (page > 3) {
                         pages.push('ellipsis');
                       }
-                      
+
                       const start = Math.max(2, page - 1);
                       const end = Math.min(totalPages - 1, page + 1);
-                      
+
                       for (let i = start; i <= end; i++) {
                         if (i !== 1 && i !== totalPages) {
                           pages.push(i);
                         }
                       }
-                      
+
                       if (page < totalPages - 2) {
                         pages.push('ellipsis');
                       }
-                      
+
                       pages.push(totalPages);
                     }
-                    
+
                     return pages.map((item, index) => {
                       if (item === 'ellipsis') {
                         return (

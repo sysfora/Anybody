@@ -35,6 +35,7 @@ import { SUBSCRIPTION_RESUME_KEY, SubscriptionPopup, type SubscriptionResumeData
 import { AutoReloadDialog } from '@/components/AutoReloadDialog';
 import { clearLastChatSlug } from '@/app/chat/chat-shell';
 import { toast } from 'sonner';
+import * as htmlToImage from 'html-to-image';
 
 /** sessionStorage helpers for per-project prompt persistence */
 const promptKey = (slug: string) => `chat_prompt_${encodeURIComponent(slug)}`;
@@ -89,6 +90,7 @@ type ProjectLoadPayload = {
     visibility?: string;
     status?: string;
     deployed?: boolean;
+    preview?: string;
   };
   html?: string;
   messages?: Array<{
@@ -208,6 +210,46 @@ export default function ChatView({
     }
   }, []);
 
+  const capturePreview = useCallback(() => {
+    // Capture preview after layout is ready
+    setTimeout(async () => {
+      try {
+        const pbId = projectPbIdRef.current;
+        if (!pbId || !sessionAuthedRef.current) return;
+
+        const iframe = document.querySelector('iframe[title="Preview"]') as HTMLIFrameElement;
+        if (!iframe || !iframe.contentWindow?.document.body) return;
+
+        const body = iframe.contentWindow.document.body;
+        const dataUrl = await htmlToImage.toJpeg(body, {
+          quality: 0.8,
+          backgroundColor: '#ffffff',
+          height: 720,
+          width: 1280,
+          style: { overflow: 'hidden' }
+        });
+
+        const res = await fetch(dataUrl);
+        const blob = await res.blob();
+
+        const formData = new FormData();
+        formData.append('project_id', pbId);
+        formData.append('preview', blob, 'preview.jpg');
+
+        const uploadRes = await fetch('/api/projects/preview', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!uploadRes.ok) {
+          console.warn("Failed to upload project preview via API");
+        }
+      } catch (err) {
+        console.warn("Failed to capture project preview:", err);
+      }
+    }, 3000);
+  }, []);
+
   const handleRefreshPreview = useCallback(() => {
     setIframeKey((k) => k + 1);
   }, []);
@@ -258,8 +300,8 @@ export default function ChatView({
     if (!slug) return;
     const saved = loadPrompt(slug);
     if (saved) setPrompt(saved);
-  // Only run when the slug first becomes available.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Only run when the slug first becomes available.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectIdFromUrl]);
 
   // On mount, capture any pending message to auto-submit once the socket connects.
@@ -294,7 +336,7 @@ export default function ChatView({
     autoSubmitVisibilityRef.current =
       (pendingSubmission.visibility as VisibilityOption) ?? 'public';
     clearPendingSubmission();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally runs once on mount
 
   // When the socket connects, fire the pending auto-submit from the home page.
@@ -305,7 +347,7 @@ export default function ChatView({
     autoSubmitMessageRef.current = null;
     setVisibility(autoSubmitVisibilityRef.current);
     void handleSubmit(msg);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsConnected]); // handleSubmit intentionally omitted — uses wsConnectedRef internally
 
   const loadedProjectKeyRef = useRef<string | null>(null);
@@ -376,9 +418,14 @@ export default function ChatView({
         }
         setProjectLoadStatus(st);
         setStatus(mapProjectStatusFromPb(st));
+
+        // Auto-generate preview if missing and project is completed
+        if (!data.project?.preview && st === 'completed' && typeof data.html === 'string' && data.html.trim().length > 0) {
+          capturePreview();
+        }
       }
     },
-    [clearGenerationWatchdog, setStatus, setVisibility],
+    [clearGenerationWatchdog, setStatus, setVisibility, capturePreview],
   );
 
   useEffect(() => {
@@ -463,7 +510,17 @@ export default function ChatView({
       setPreviewUrl(null);
       return;
     }
-    const blob = new Blob([htmlSource], { type: 'text/html' });
+    // Inject forced light-mode isolation. We surgically inject into the head if it exists to maintain valid HTML structure.
+    const isolationSnippet = `<meta name="color-scheme" content="light"><style>:root { color-scheme: light !important; } body { background-color: white; color: black; margin: 0; min-height: 100vh; }</style>`;
+    let isolatedHtml = htmlSource;
+    if (htmlSource.includes('<head>')) {
+      isolatedHtml = htmlSource.replace('<head>', '<head>' + isolationSnippet);
+    } else if (htmlSource.includes('<html>')) {
+        isolatedHtml = htmlSource.replace('<html>', '<html><head>' + isolationSnippet + '</head>');
+    } else {
+      isolatedHtml = isolationSnippet + htmlSource;
+    }
+    const blob = new Blob([isolatedHtml], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
     previewObjectUrlRef.current = url;
     setPreviewUrl(url);
@@ -627,6 +684,9 @@ export default function ChatView({
         if (!data || data === 'not-found') return;
         applyProjectLoad(data, { force: true });
       })();
+
+      // Capture preview after layout is ready
+      capturePreview();
     };
 
     const onGenerationError = (payload: {
@@ -694,12 +754,12 @@ export default function ChatView({
       prev.map((m) =>
         m.id === aid
           ? {
-              ...m,
-              id: `assistant-${Date.now()}`,
-              content: m.content?.trim()
-                ? `${m.content}\n\nGeneration stopped.`
-                : 'Generation stopped.',
-            }
+            ...m,
+            id: `assistant-${Date.now()}`,
+            content: m.content?.trim()
+              ? `${m.content}\n\nGeneration stopped.`
+              : 'Generation stopped.',
+          }
           : m,
       ),
     );
@@ -897,11 +957,11 @@ export default function ChatView({
           prev.map((m) =>
             m.id === aid
               ? {
-                  ...m,
-                  id: `assistant-${Date.now()}`,
-                  content:
-                    'No response from the server. Run `npm run dev:ws` (port 5000) and ensure `NEXT_PUBLIC_WS_URL` matches, then try again.',
-                }
+                ...m,
+                id: `assistant-${Date.now()}`,
+                content:
+                  'No response from the server. Run `npm run dev:ws` (port 5000) and ensure `NEXT_PUBLIC_WS_URL` matches, then try again.',
+              }
               : m,
           ),
         );
@@ -1041,10 +1101,10 @@ export default function ChatView({
                   Describe your idea — a landing page, portfolio, dashboard, or
                   anything else — and watch it come to life.
                 </p>
-                
+
                 {authResolved &&
-                projectIdFromUrl?.trim() &&
-                !sessionAuthed ? (
+                  projectIdFromUrl?.trim() &&
+                  !sessionAuthed ? (
                   <p className="mt-3 text-xs text-muted-foreground max-w-[260px] leading-relaxed">
                     Sign in to load your saved project.
                   </p>
@@ -1188,7 +1248,7 @@ export default function ChatView({
                 <div
                   id="iframe-container"
                   className={cn(
-                    'h-full overflow-hidden rounded-lg bg-background transition-all duration-300',
+                    'h-full overflow-hidden rounded-lg transition-all duration-300',
                     deviceSize === 'desktop' && 'w-full',
                     deviceSize !== 'desktop' && 'mx-auto',
                   )}
@@ -1196,6 +1256,8 @@ export default function ChatView({
                     width:
                       deviceSize === 'desktop' ? '100%' : deviceSizes[deviceSize],
                     maxWidth: '100%',
+                    backgroundColor: 'white',
+                    colorScheme: 'light',
                   }}
                 >
                   <iframe
@@ -1203,6 +1265,7 @@ export default function ChatView({
                     src={previewUrl}
                     className="w-full h-full border-0"
                     title="Preview"
+                    style={{ backgroundColor: 'white', colorScheme: 'light' }}
                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                   />
                 </div>
