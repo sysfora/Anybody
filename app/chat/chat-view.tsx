@@ -984,7 +984,7 @@ export default function ChatView({
   return (
     <div className="flex h-screen flex-col bg-background">
       <Sidebar />
-      <NavigationBar variant="chat" demoMode />
+      <NavigationBar variant="chat" />
       <div className="flex h-full flex-col lg:flex-row md:ml-16">
         <div className="w-full lg:w-96 flex flex-col h-full border-r border-border bg-card overflow-hidden">
           <div className="flex items-center justify-between border-b border-border px-4 h-14 flex-shrink-0 m-0">

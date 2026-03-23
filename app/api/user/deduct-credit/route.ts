@@ -10,7 +10,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: '2025-11-17.clover',
 });
 
-const CREDIT_COST_PER_GENERATION = 100;
+const CREDIT_COST_PER_GENERATION = 10;
 
 interface PocketBaseUser {
   id: string;

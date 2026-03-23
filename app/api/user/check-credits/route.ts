@@ -5,7 +5,7 @@ import { getEffectiveUserId } from '@/lib/server-utils';
 
 export const dynamic = 'force-dynamic';
 
-const CREDIT_COST_PER_GENERATION = 100;
+const CREDIT_COST_PER_GENERATION = 10;
 
 interface PocketBaseUser {
   id: string;

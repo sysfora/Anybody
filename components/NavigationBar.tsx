@@ -52,7 +52,7 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
   const isWorking = status === 'generating' || status === 'modifying' || status === 'building' || status === 'uploading';
 
   // /p/username/projectname — used for open-in-new-tab and as the canonical deployed URL.
-  const currentUsername = pb.authStore.record?.username as string | undefined;
+  const currentUsername = (pb.authStore.record?.username || pb.authStore.model?.username) as string | undefined;
   const publicProjectUrl =
     hasProject && currentUsername
       ? `/p/${encodeURIComponent(currentUsername)}/${encodeURIComponent(projectName!)}`
@@ -174,7 +174,11 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
       setIsDeployed(deployed);
       
       // Generate deployed URL
-      if (deployed) {
+      if (deployed && statusData.username) {
+        const origin = typeof window !== 'undefined' ? window.location.origin : '';
+        const realUrl = `/p/${encodeURIComponent(statusData.username)}/${encodeURIComponent(projectName!)}`;
+        setDeployedUrl(`${origin}${realUrl}`);
+      } else if (deployed) {
         const origin = typeof window !== 'undefined' ? window.location.origin : '';
         setDeployedUrl(publicProjectUrl ? `${origin}${publicProjectUrl}` : '');
       } else {
@@ -212,11 +216,16 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
         throw new Error(error.error || 'Failed to deploy project');
       }
 
-      await response.json();
+      const responseData = await response.json();
       setIsDeployed(true);
 
       const origin = typeof window !== 'undefined' ? window.location.origin : '';
-      setDeployedUrl(publicProjectUrl ? `${origin}${publicProjectUrl}` : '');
+      if (responseData.username) {
+        const realUrl = `/p/${encodeURIComponent(responseData.username)}/${encodeURIComponent(projectName!)}`;
+        setDeployedUrl(`${origin}${realUrl}`);
+      } else {
+        setDeployedUrl(publicProjectUrl ? `${origin}${publicProjectUrl}` : '');
+      }
       
       toast.success("Deployed successfully", {
         description: "Your project is now live and accessible"
@@ -492,20 +501,22 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
           ) : isDeployed ? (
             <div className="space-y-4">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Deployed URL</label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    readOnly
-                    value={deployedUrl}
-                    className="flex-1 px-3 py-2 text-sm border border-border rounded-md bg-muted"
-                  />
+                <label className="text-sm font-medium text-muted-foreground">Your project is live at:</label>
+                <div className="flex items-center justify-between p-3 border border-border rounded-lg bg-muted/30">
+                  <a
+                    href={deployedUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-primary hover:underline truncate mr-4 font-medium transition-colors"
+                  >
+                    {deployedUrl}
+                  </a>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={handleCopyLink}
                     disabled={isCopying || !deployedUrl}
-                    className="gap-2"
+                    className="gap-2 shrink-0"
                   >
                     {isCopying ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
@@ -759,20 +770,22 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
           ) : isDeployed ? (
             <div className="space-y-4">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Deployed URL</label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    readOnly
-                    value={deployedUrl}
-                    className="flex-1 px-3 py-2 text-sm border border-border rounded-md bg-muted"
-                  />
+                <label className="text-sm font-medium text-muted-foreground">Your project is live at:</label>
+                <div className="flex items-center justify-between p-3 border border-border rounded-lg bg-muted/30">
+                  <a
+                    href={deployedUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-primary hover:underline truncate mr-4 font-medium transition-colors"
+                  >
+                    {deployedUrl}
+                  </a>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={handleCopyLink}
                     disabled={isCopying || !deployedUrl}
-                    className="gap-2"
+                    className="gap-2 shrink-0"
                   >
                     {isCopying ? (
                       <Loader2 className="h-4 w-4 animate-spin" />

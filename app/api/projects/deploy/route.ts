@@ -31,11 +31,13 @@ export async function GET(request: NextRequest) {
 
     // Get userId - either use provided userId or look up by username
     let resolvedUserId: string;
+    let resolvedUsername: string;
     if (userId) {
       // Verify user exists
       try {
-        await pb.collection('users').getOne(userId);
+        const userRec = await pb.collection('users').getOne(userId);
         resolvedUserId = userId;
+        resolvedUsername = userRec.username;
       } catch {
         return NextResponse.json(
           { error: 'User not found' },
@@ -56,6 +58,7 @@ export async function GET(request: NextRequest) {
       }
 
       resolvedUserId = users.items[0].id;
+      resolvedUsername = users.items[0].username;
     }
     
     // Get effective user ID (owner ID if team member, otherwise user's own ID)
@@ -78,6 +81,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       success: true,
       deployed: project.deployed || false,
+      username: resolvedUsername,
     });
   } catch (error: unknown) {
     console.error('Get deployment status error:', error);
@@ -122,11 +126,13 @@ export async function POST(request: NextRequest) {
 
     // Get userId - either use provided userId or look up by username
     let userId: string;
+    let resolvedUsername: string;
     if (providedUserId) {
       // Verify user exists
       try {
-        await pb.collection('users').getOne(providedUserId);
+        const userRec = await pb.collection('users').getOne(providedUserId);
         userId = providedUserId;
+        resolvedUsername = userRec.username;
       } catch {
         return NextResponse.json(
           { error: 'User not found' },
@@ -147,6 +153,7 @@ export async function POST(request: NextRequest) {
       }
 
       userId = users.items[0].id;
+      resolvedUsername = users.items[0].username;
     }
 
     // Get effective user ID (owner ID if team member, otherwise user's own ID)
@@ -179,6 +186,7 @@ export async function POST(request: NextRequest) {
         name: updatedProject.name,
         deployed: updatedProject.deployed,
       },
+      username: resolvedUsername,
     });
   } catch (error: unknown) {
     console.error('Deploy error:', error);
