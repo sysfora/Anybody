@@ -130,6 +130,8 @@ export default async function UserProjectsPage({
               username={userUsername} 
               userId={userId} 
               avatar={avatar} 
+              totalPages={totalPages}
+              currentPage={page}
             />
 
             {totalPages > 1 && (

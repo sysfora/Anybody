@@ -1,15 +1,24 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-interface UseProjectPaginationOptions {
+interface UseProjectPaginationOptions<T> {
   apiUrl: string;
   initialLimit?: number;
+  initialItems?: T[];
+  initialPage?: number;
+  initialHasMore?: boolean;
 }
 
-export function useProjectPagination<T>({ apiUrl, initialLimit = 12 }: UseProjectPaginationOptions) {
-  const [items, setItems] = useState<T[]>([]);
-  const [page, setPage] = useState(1);
+export function useProjectPagination<T>({ 
+  apiUrl, 
+  initialLimit = 12,
+  initialItems = [],
+  initialPage = 1,
+  initialHasMore = true
+}: UseProjectPaginationOptions<T>) {
+  const [items, setItems] = useState<T[]>(initialItems);
+  const [page, setPage] = useState(initialPage);
   const [loading, setLoading] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
+  const [hasMore, setHasMore] = useState(initialHasMore);
   const [error, setError] = useState<string | null>(null);
   
   const loadingRef = useRef(false);
@@ -32,7 +41,12 @@ export function useProjectPagination<T>({ apiUrl, initialLimit = 12 }: UseProjec
 
       if (data.success) {
         const newItems = data.projects || [];
-        setItems((prev) => [...prev, ...newItems]);
+        setItems((prev) => {
+          // Filter out duplicates if any (by id)
+          const existingIds = new Set(prev.map((item: any) => item.id));
+          const uniqueNewItems = newItems.filter((item: any) => !existingIds.has(item.id));
+          return [...prev, ...uniqueNewItems];
+        });
         setHasMore(page < data.totalPages);
         setPage((prev) => prev + 1);
       } else {
@@ -47,9 +61,11 @@ export function useProjectPagination<T>({ apiUrl, initialLimit = 12 }: UseProjec
     }
   }, [apiUrl, page, hasMore, initialLimit]);
 
-  // Initial fetch
+  // Initial fetch only if we don't have items yet
   useEffect(() => {
-    fetchMore();
+    if (items.length === 0 && hasMore) {
+      fetchMore();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

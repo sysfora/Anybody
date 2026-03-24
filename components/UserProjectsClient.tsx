@@ -8,6 +8,7 @@ import { useRouter } from 'next/navigation';
 import { useToast } from '@/hooks/use-toast';
 import pb from '@/lib/pocketbase';
 import { useProjectPagination } from '@/hooks/useProjectPagination';
+import type { RecordModel } from 'pocketbase';
 
 interface Project {
   id: string;
@@ -18,15 +19,28 @@ interface Project {
 }
 
 interface UserProjectsClientProps {
+  projects: RecordModel[];
   username: string;
   userId: string;
   avatar: string;
+  totalPages: number;
+  currentPage: number;
 }
 
-export function UserProjectsClient({ username, userId, avatar }: UserProjectsClientProps) {
+export function UserProjectsClient({ 
+  projects: initialProjects, 
+  username, 
+  userId, 
+  avatar,
+  totalPages,
+  currentPage 
+}: UserProjectsClientProps) {
   const { items: projects, loading, hasMore, fetchMore } = useProjectPagination<any>({
     apiUrl: `/api/users/${username}/public-projects`,
-    initialLimit: 12
+    initialLimit: 12,
+    initialItems: initialProjects,
+    initialPage: currentPage + 1,
+    initialHasMore: currentPage < totalPages
   });
 
   const [remixingId, setRemixingId] = useState<string | null>(null);
