@@ -155,6 +155,7 @@ async def _stream_generation(
     user_text: str,
     request_id: str,
     project_id: str | None = None,
+    user_message_id: str | None = None,
 ) -> None:
     assistant_message_id: str | None = None
     cm = None
@@ -185,13 +186,21 @@ async def _stream_generation(
                 pb = None
 
         if project_id and pb:
-            await create_message_with_client(
-                pb,
-                project_id,
-                "user",
-                user_text,
-                request_id=request_id,
-            )
+            # Only create a user message if it wasn't already created client-side
+            # (client creates it directly when there are file attachments).
+            if not user_message_id:
+                await create_message_with_client(
+                    pb,
+                    project_id,
+                    "user",
+                    user_text,
+                    request_id=request_id,
+                )
+            else:
+                logger.info(
+                    "skipping user message creation; already created client-side id=%s",
+                    user_message_id,
+                )
             assistant_message_id = await create_message_with_client(
                 pb,
                 project_id,
@@ -407,18 +416,32 @@ async def user_message(sid, data):
     request_id = data.get("request_id") or "unknown"
     raw_pid = data.get("project_id")
     project_id = raw_pid.strip() if isinstance(raw_pid, str) and raw_pid.strip() else None
+    # Pre-created user message id (when client uploaded attachments directly).
+    user_message_id = (data.get("user_message_id") or "").strip() or None
+    # Attachment metadata for logging only.
+    attachments = data.get("attachments") or []
     logger.info(
-        "user_message sid=%s request_id=%s len=%s project_id=%s",
+        "user_message sid=%s request_id=%s len=%s project_id=%s attachments=%d",
         sid,
         request_id,
         len(text),
         project_id or "-",
+        len(attachments),
     )
+    for att in attachments:
+        if isinstance(att, dict):
+            logger.info(
+                "  attachment received: name=%s size=%s",
+                att.get("name", "?"),
+                att.get("size", "?"),
+            )
     if request_id in _generation_tasks and not _generation_tasks[request_id].done():
         logger.warning("duplicate request_id=%s ignored", request_id)
         return
 
-    t = asyncio.create_task(_stream_generation(sid, text, request_id, project_id))
+    t = asyncio.create_task(
+        _stream_generation(sid, text, request_id, project_id, user_message_id)
+    )
     _generation_tasks[request_id] = t
 
     def _cleanup(_: asyncio.Task) -> None:

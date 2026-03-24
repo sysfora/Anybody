@@ -134,6 +134,37 @@ export async function GET(request: NextRequest) {
         const created =
           pickStr(flat, ['created', 'Created']) || new Date().toISOString();
         const request_id = pickStr(flat, ['request_id', 'requestId']);
+        
+        const attachmentsRaw = flat.attachments;
+        const attachments: Array<{ name: string; url: string; mimeType: string }> = [];
+        
+        if (Array.isArray(attachmentsRaw)) {
+          const pbUrl = (process.env.NEXT_PUBLIC_POCKETBASE_URL || process.env.POCKETBASE_URL || '').replace(/\/$/, '');
+          attachmentsRaw.forEach((filename: string) => {
+            if (typeof filename !== 'string') return;
+            
+            // Construct full PocketBase file URL
+            const url = `${pbUrl}/api/files/project_messages/${id}/${filename}`;
+            
+            // Guess mime-type based on extension
+            let mimeType = 'application/octet-stream';
+            const ext = filename.split('.').pop()?.toLowerCase();
+            if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext || '')) {
+              mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+            } else if (ext === 'pdf') {
+              mimeType = 'application/pdf';
+            } else if (['txt', 'md', 'html', 'css', 'js', 'ts', 'json'].includes(ext || '')) {
+              mimeType = ext === 'txt' ? 'text/plain' : `text/${ext}`;
+            }
+
+            attachments.push({
+              name: filename,
+              url,
+              mimeType,
+            });
+          });
+        }
+
         return {
           id,
           role: roleRaw === 'user' ? 'user' : 'assistant',
@@ -141,6 +172,7 @@ export async function GET(request: NextRequest) {
           thinking,
           created,
           request_id,
+          attachments: attachments.length > 0 ? attachments : undefined,
         };
       });
     } catch {

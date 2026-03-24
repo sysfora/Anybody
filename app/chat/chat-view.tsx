@@ -15,12 +15,17 @@ import {
   Rocket,
   Eye,
   Square,
+  Paperclip,
+  X,
+  FileText,
+  FileCode,
 } from 'lucide-react';
 import { Sidebar } from '@/components/Dashboard/Sidebar';
 import { NavigationBar } from '@/components/NavigationBar';
 import {
   ChatMessages,
   type ChatMessage,
+  type AttachmentMeta,
 } from '@/components/Dashboard/ChatMessages';
 import { CodeHighlight } from '@/components/Dashboard/CodeHighlight';
 import { useProject, type ProjectStatus } from '@/context/ProjectContext';
@@ -131,6 +136,10 @@ export default function ChatView({
   const submitInFlightRef = useRef(false);
   const pendingAssistantIdRef = useRef<string | null>(null);
   const pendingRequestIdRef = useRef<string | null>(null);
+
+  // File attachments state
+  const [attachments, setAttachments] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const generationWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -421,12 +430,13 @@ export default function ChatView({
         clearGenerationWatchdog();
         const rows = data.messages ?? [];
         setChatMessages(
-          rows.map((m) => ({
+          rows.map((m: any) => ({
             id: m.id,
             type: m.role,
             content: m.content ?? '',
             thinking: m.thinking?.trim() ? m.thinking : undefined,
             timestamp: new Date(m.created),
+            attachments: m.attachments,
           })),
         );
         if (typeof data.html === 'string') {
@@ -941,6 +951,21 @@ export default function ChatView({
         });
       }
 
+      // Snapshot attachments before clearing state
+      const pendingFiles = [...attachments];
+
+      // Build optimistic local previews (blob URLs) so attachments show immediately
+      type LocalAttachment = AttachmentMeta & { objectUrl?: string };
+      const localAttachments: LocalAttachment[] = pendingFiles.map((f) => {
+        const objectUrl = URL.createObjectURL(f);
+        return {
+          name: f.name,
+          url: objectUrl,
+          mimeType: f.type || 'application/octet-stream',
+          objectUrl,
+        };
+      });
+
       const userContent = text;
 
       const t = Date.now();
@@ -969,6 +994,7 @@ export default function ChatView({
             type: 'user',
             content: userContent,
             timestamp: new Date(),
+            attachments: localAttachments.length > 0 ? localAttachments : undefined,
           },
           {
             id: pendingId,
@@ -980,6 +1006,9 @@ export default function ChatView({
         ]);
       });
       setPrompt('');
+      setAttachments([]);
+      // Reset file input so the same file can be re-selected
+      if (fileInputRef.current) fileInputRef.current.value = '';
       clearPrompt(projectIdFromUrlRef.current?.trim());
       clearGenerationWatchdog();
       generationWatchdogRef.current = setTimeout(() => {
@@ -1010,12 +1039,46 @@ export default function ChatView({
         });
       }, 30000);
 
+      // If there are attachments and we have a project, create the user message
+      // client-side (multipart) so the files are persisted before socket emit.
+      let preCreatedUserMessageId: string | undefined;
+      if (pendingFiles.length > 0 && pocketbaseProjectId && pb.authStore.isValid) {
+        try {
+          const msgForm = new FormData();
+          msgForm.set('project_id', pocketbaseProjectId);
+          msgForm.set('role', 'user');
+          msgForm.set('content', userContent);
+          msgForm.set('request_id', requestId);
+          for (const f of pendingFiles) {
+            msgForm.append('attachments', f, f.name);
+          }
+          const msgRes = await fetch('/api/projects/messages/create', {
+            method: 'POST',
+            body: msgForm,
+            credentials: 'include',
+          });
+          if (msgRes.ok) {
+            const msgData = (await msgRes.json()) as { id?: string };
+            if (typeof msgData.id === 'string' && msgData.id.trim()) {
+              preCreatedUserMessageId = msgData.id.trim();
+            }
+          }
+        } catch {
+          /* non-blocking — best-effort attachment upload */
+        }
+        // Revoke optimistic blob URLs now that we have real PB URLs
+        // (the chat will refresh from DB after generation_done)
+        for (const la of localAttachments) {
+          if (la.objectUrl) URL.revokeObjectURL(la.objectUrl);
+        }
+      }
+
       socket.emit('user_message', {
         text: userContent,
         request_id: requestId,
-        ...(pocketbaseProjectId
-          ? { project_id: pocketbaseProjectId }
-          : {}),
+        ...(pocketbaseProjectId ? { project_id: pocketbaseProjectId } : {}),
+        ...(preCreatedUserMessageId ? { user_message_id: preCreatedUserMessageId } : {}),
+        attachments: pendingFiles.map((f) => ({ name: f.name, size: f.size })),
       });
 
       // Deduct credit and trigger auto-reload if needed (fire-and-forget)
@@ -1059,6 +1122,51 @@ export default function ChatView({
       textareaRef.current.style.height = 'auto';
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 150)}px`;
     }
+  };
+
+  const MAX_ATTACHMENT_FILES = 5;
+  const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5 MB
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(e.target.files ?? []);
+    if (!selected.length) return;
+
+    const oversized = selected.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
+    if (oversized.length) {
+      toast.error(
+        `${oversized.map((f) => f.name).join(', ')} exceed${oversized.length === 1 ? 's' : ''} the 5 MB limit and will not be attached.`,
+      );
+    }
+    const valid = selected.filter((f) => f.size <= MAX_ATTACHMENT_BYTES);
+
+    setAttachments((prev) => {
+      const combined = [...prev, ...valid];
+      if (combined.length > MAX_ATTACHMENT_FILES) {
+        toast.error(`You can attach up to ${MAX_ATTACHMENT_FILES} files. Extra files were removed.`);
+        return combined.slice(0, MAX_ATTACHMENT_FILES);
+      }
+      return combined;
+    });
+    // Reset so the same file can be picked again
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const removeAttachment = (index: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  /** Icon to show in the attachment chip for non-image files */
+  const getFileChipIcon = (file: File) => {
+    const t = file.type;
+    if (t === 'application/pdf') return <FileText className="h-3 w-3 shrink-0" />;
+    if (
+      t.startsWith('text/') ||
+      t.includes('javascript') ||
+      t.includes('typescript') ||
+      t.includes('json') ||
+      t.includes('xml')
+    ) return <FileCode className="h-3 w-3 shrink-0" />;
+    return <Paperclip className="h-3 w-3 shrink-0" />;
   };
 
   const handleVisibilityChange = async (newVisibility: VisibilityOption) => {
@@ -1175,8 +1283,56 @@ export default function ChatView({
           </div>
 
           <div className="border-t border-border p-4 flex-shrink-0">
+            {/* Hidden file input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={handleFileSelect}
+              disabled={busy || !wsConnected || attachments.length >= MAX_ATTACHMENT_FILES}
+            />
             <div className="relative group">
-              <div className="bg-white dark:bg-black border-2 border-border rounded-2xl p-3 sm:p-4 transition-all duration-300 max-h-[200px] sm:max-h-[250px] flex flex-col">
+              <div className="bg-white dark:bg-black border-2 border-border rounded-2xl p-3 sm:p-4 transition-all duration-300 flex flex-col">
+                {/* Attachment preview strip */}
+                {attachments.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mb-2 pb-2 border-b border-border/50">
+                    {attachments.map((file, idx) => {
+                      const isImage = file.type.startsWith('image/');
+                      return (
+                        <div
+                          key={`${file.name}-${idx}`}
+                          className="relative group/chip flex items-center gap-1.5 rounded-lg border border-border bg-muted/40 text-xs text-foreground overflow-hidden max-w-[160px]"
+                        >
+                          {isImage ? (
+                            <>
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={URL.createObjectURL(file)}
+                                alt={file.name}
+                                className="h-10 w-10 object-cover rounded-l-lg shrink-0"
+                              />
+                              <span className="truncate pr-1 py-1 text-[11px]">{file.name}</span>
+                            </>
+                          ) : (
+                            <div className="flex items-center gap-1.5 px-2 py-1.5">
+                              {getFileChipIcon(file)}
+                              <span className="truncate text-[11px]">{file.name}</span>
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => removeAttachment(idx)}
+                            className="absolute top-0.5 right-0.5 rounded-full bg-background/80 p-0.5 opacity-0 group-hover/chip:opacity-100 transition-opacity hover:bg-destructive/10 hover:text-destructive"
+                            title={`Remove ${file.name}`}
+                          >
+                            <X className="h-2.5 w-2.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 <div className="flex-1 mb-3 min-h-0">
                   <Textarea
                     ref={textareaRef}
@@ -1199,6 +1355,16 @@ export default function ChatView({
                 </div>
                 <div className="flex items-center justify-between flex-shrink-0">
                   <div className="flex items-center gap-2">
+                    {/* Paperclip button */}
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={busy || !wsConnected || attachments.length >= MAX_ATTACHMENT_FILES}
+                      title={attachments.length >= MAX_ATTACHMENT_FILES ? 'Maximum 5 attachments reached' : 'Attach files (max 5, 5 MB each)'}
+                      className="flex items-center justify-center h-8 w-8 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <Paperclip className="h-4 w-4" />
+                    </button>
                     <VisibilityDropdown
                       value={visibility}
                       onValueChange={handleVisibilityChange}
@@ -1222,7 +1388,7 @@ export default function ChatView({
                       onClick={() => void handleSubmit()}
                       disabled={
                         !wsConnected ||
-                        !prompt.trim()
+                        (!prompt.trim() && attachments.length === 0)
                       }
                       variant="default"
                       size="icon"

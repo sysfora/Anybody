@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Loader2 } from 'lucide-react';
+import { ChevronDown, Loader2, FileText, FileCode, Paperclip } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Collapsible,
@@ -9,12 +9,22 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
 
+export interface AttachmentMeta {
+  /** Original filename */
+  name: string;
+  /** Full PocketBase file URL */
+  url: string;
+  /** MIME type, e.g. "image/png" */
+  mimeType: string;
+}
+
 export interface ChatMessage {
   id: string;
   type: 'user' | 'assistant';
   content: string;
   timestamp: Date;
   thinking?: string;
+  attachments?: AttachmentMeta[];
 }
 
 function formatTime(d: Date): string {
@@ -131,9 +141,9 @@ function AssistantBlock({
       ) : null}
 
       {generationActive &&
-      !suppressWorkingPlaceholder &&
-      !showContent &&
-      !showThinking ? (
+        !suppressWorkingPlaceholder &&
+        !showContent &&
+        !showThinking ? (
         <div className="flex items-center gap-2 rounded-xl border border-border bg-muted/20 px-3 py-3">
           <span
             className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/60 animate-pulse"
@@ -160,10 +170,75 @@ function AssistantBlock({
   );
 }
 
+function AttachmentIcon({ mimeType }: { mimeType: string }) {
+  if (mimeType.startsWith('image/')) return null;
+  if (mimeType === 'application/pdf') return <FileText className="h-4 w-4 shrink-0" />;
+  if (
+    mimeType.startsWith('text/') ||
+    mimeType.includes('javascript') ||
+    mimeType.includes('typescript') ||
+    mimeType.includes('json') ||
+    mimeType.includes('xml')
+  )
+    return <FileCode className="h-4 w-4 shrink-0" />;
+  return <Paperclip className="h-4 w-4 shrink-0" />;
+}
+
+function AttachmentPreviews({ attachments }: { attachments: AttachmentMeta[] }) {
+  if (!attachments.length) return null;
+  return (
+    <div className="flex flex-wrap gap-2.5 mb-3">
+      {attachments.map((a) => {
+        const isImage = a.mimeType.startsWith('image/');
+        return (
+          <a
+            key={a.url}
+            href={a.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={cn(
+              "group relative flex items-center gap-2 overflow-hidden rounded-xl border border-background/20 bg-background/5 transition-all hover:bg-background/10 active:scale-[0.98] shadow-sm",
+              isImage ? "h-24 w-24 p-0 shrink-0" : "h-11 px-3 py-2 max-w-[200px]"
+            )}
+            title={a.name}
+          >
+            {isImage ? (
+              <img
+                src={a.url}
+                alt={a.name}
+                className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                loading="lazy"
+              />
+            ) : (
+              <>
+                <div className="text-background/90 group-hover:text-background transition-colors">
+                  <AttachmentIcon mimeType={a.mimeType} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[11px] font-medium leading-none text-background/90 group-hover:text-background mb-0.5 transition-colors">
+                    {a.name}
+                  </p>
+                  <p className="text-[9px] text-background/40 uppercase font-bold tracking-tight">
+                    {a.mimeType.split('/')[1] || 'FILE'}
+                  </p>
+                </div>
+              </>
+            )}
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
 function UserBubble({ message }: { message: ChatMessage }) {
+  const hasAttachments = (message.attachments?.length ?? 0) > 0;
   return (
     <div className="flex w-fit max-w-full flex-col items-start gap-1.5">
       <div className="w-full min-w-0 rounded-2xl border border-border bg-foreground px-3.5 py-2.5 sm:px-4 sm:py-3">
+        {hasAttachments && (
+          <AttachmentPreviews attachments={message.attachments!} />
+        )}
         <p className="whitespace-pre-wrap text-sm leading-relaxed text-background sm:text-[15px]">
           {message.content}
         </p>
