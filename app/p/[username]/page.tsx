@@ -17,6 +17,9 @@ import {
 import { ExternalLink, Calendar, Eye } from 'lucide-react';
 import Link from 'next/link';
 import { UserProjectsClient } from '@/components/UserProjectsClient';
+import { Navbar } from '@/components/Home/Navbar';
+import Footer from '@/components/Home/Footer';
+import Background from '@/components/Home/Background';
 
 interface UserProjectsPageProps {
   params: Promise<{ username: string }>;
@@ -106,109 +109,116 @@ export default async function UserProjectsPage({
   const { projects, totalItems, totalPages, page, username: userUsername, userId, avatar } = data;
 
   return (
-    <div className="min-h-screen bg-background">
-      <div className="container mx-auto px-4 py-12 max-w-7xl">
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold mb-2">{userUsername}&apos;s Projects</h1>
-          <p className="text-muted-foreground">
-            {totalItems} {totalItems === 1 ? 'public project' : 'public projects'}
-          </p>
-        </div>
-
-        {projects.length === 0 ? (
-          <Card className="rounded-2xl border-border">
-            <CardContent className="p-12 text-center">
-              <p className="text-muted-foreground text-lg">
-                No public projects found for this user.
+    <>
+      <Background />
+      <div className="min-h-screen flex flex-col relative overflow-x-hidden">
+        <Navbar />
+        <main className="flex-1 bg-transparent pb-20 pt-24">
+          <div className="container mx-auto px-4 py-12 max-w-7xl">
+            <div className="mb-8">
+              <h1 className="text-4xl font-bold mb-2">{userUsername}&apos;s Projects</h1>
+              <p className="text-muted-foreground">
+                {totalItems} {totalItems === 1 ? 'public project' : 'public projects'}
               </p>
-            </CardContent>
-          </Card>
-        ) : (
-          <>
-            <UserProjectsClient 
-              projects={projects} 
-              username={userUsername} 
-              userId={userId} 
-              avatar={avatar} 
-              totalPages={totalPages}
-              currentPage={page}
-            />
+            </div>
 
-            {totalPages > 1 && (
-              <Pagination>
-                <PaginationContent>
-                  {page > 1 && (
-                    <PaginationItem>
-                      <PaginationPrevious
-                        href={`/p/${username}?page=${page - 1}`}
-                      />
-                    </PaginationItem>
-                  )}
+            {projects.length === 0 ? (
+              <Card className="rounded-2xl border-border">
+                <CardContent className="p-12 text-center">
+                  <p className="text-muted-foreground text-lg">
+                    No public projects found for this user.
+                  </p>
+                </CardContent>
+              </Card>
+            ) : (
+              <>
+                <UserProjectsClient 
+                  projects={projects} 
+                  username={userUsername} 
+                  userId={userId} 
+                  avatar={avatar} 
+                  totalPages={totalPages}
+                  currentPage={page}
+                />
 
-                  {(() => {
-                    const pages: (number | 'ellipsis')[] = [];
-
-                    if (totalPages <= 7) {
-                      for (let i = 1; i <= totalPages; i++) {
-                        pages.push(i);
-                      }
-                    } else {
-                      pages.push(1);
-
-                      if (page > 3) {
-                        pages.push('ellipsis');
-                      }
-
-                      const start = Math.max(2, page - 1);
-                      const end = Math.min(totalPages - 1, page + 1);
-
-                      for (let i = start; i <= end; i++) {
-                        if (i !== 1 && i !== totalPages) {
-                          pages.push(i);
-                        }
-                      }
-
-                      if (page < totalPages - 2) {
-                        pages.push('ellipsis');
-                      }
-
-                      pages.push(totalPages);
-                    }
-
-                    return pages.map((item, index) => {
-                      if (item === 'ellipsis') {
-                        return (
-                          <PaginationItem key={`ellipsis-${index}`}>
-                            <PaginationEllipsis />
-                          </PaginationItem>
-                        );
-                      }
-                      return (
-                        <PaginationItem key={item}>
-                          <PaginationLink
-                            href={`/p/${username}?page=${item}`}
-                            isActive={item === page}
-                            className="rounded-xl"
-                          >
-                            {item}
-                          </PaginationLink>
+                {totalPages > 1 && (
+                  <Pagination>
+                    <PaginationContent>
+                      {page > 1 && (
+                        <PaginationItem>
+                          <PaginationPrevious
+                            href={`/p/${username}?page=${page - 1}`}
+                          />
                         </PaginationItem>
-                      );
-                    });
-                  })()}
+                      )}
 
-                  {page < totalPages && (
-                    <PaginationItem>
-                      <PaginationNext href={`/p/${username}?page=${page + 1}`} />
-                    </PaginationItem>
-                  )}
-                </PaginationContent>
-              </Pagination>
+                      {(() => {
+                        const pages: (number | 'ellipsis')[] = [];
+
+                        if (totalPages <= 7) {
+                          for (let i = 1; i <= totalPages; i++) {
+                            pages.push(i);
+                          }
+                        } else {
+                          pages.push(1);
+
+                          if (page > 3) {
+                            pages.push('ellipsis');
+                          }
+
+                          const start = Math.max(2, page - 1);
+                          const end = Math.min(totalPages - 1, page + 1);
+
+                          for (let i = start; i <= end; i++) {
+                            if (i !== 1 && i !== totalPages) {
+                              pages.push(i);
+                            }
+                          }
+
+                          if (page < totalPages - 2) {
+                            pages.push('ellipsis');
+                          }
+
+                          pages.push(totalPages);
+                        }
+
+                        return pages.map((item, index) => {
+                          if (item === 'ellipsis') {
+                            return (
+                              <PaginationItem key={`ellipsis-${index}`}>
+                                <PaginationEllipsis />
+                              </PaginationItem>
+                            );
+                          }
+                          return (
+                            <PaginationItem key={item}>
+                              <PaginationLink
+                                href={`/p/${username}?page=${item}`}
+                                isActive={item === page}
+                                className="rounded-xl"
+                              >
+                                {item}
+                              </PaginationLink>
+                            </PaginationItem>
+                          );
+                        });
+                      })()}
+
+                      {page < totalPages && (
+                        <PaginationItem>
+                          <PaginationNext href={`/p/${username}?page=${page + 1}`} />
+                        </PaginationItem>
+                      )}
+                    </PaginationContent>
+                  </Pagination>
+                )}
+              </>
             )}
-          </>
-        )}
+          </div>
+        </main>
+        <Footer />
       </div>
-    </div>
+    </>
   );
 }
 
