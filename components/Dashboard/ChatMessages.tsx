@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Loader2, FileText, FileCode, Paperclip } from 'lucide-react';
+import { ChevronDown, Loader2, FileText, FileCode, Paperclip, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Collapsible,
@@ -16,6 +16,8 @@ export interface AttachmentMeta {
   url: string;
   /** MIME type, e.g. "image/png" */
   mimeType: string;
+  /** File size in bytes */
+  size?: number;
 }
 
 export interface ChatMessage {
@@ -170,7 +172,7 @@ function AssistantBlock({
   );
 }
 
-function AttachmentIcon({ mimeType }: { mimeType: string }) {
+export function AttachmentIcon({ mimeType }: { mimeType: string }) {
   if (mimeType.startsWith('image/')) return null;
   if (mimeType === 'application/pdf') return <FileText className="h-4 w-4 shrink-0" />;
   if (
@@ -184,47 +186,69 @@ function AttachmentIcon({ mimeType }: { mimeType: string }) {
   return <Paperclip className="h-4 w-4 shrink-0" />;
 }
 
-function AttachmentPreviews({ attachments }: { attachments: AttachmentMeta[] }) {
+export function AttachmentPreviews({
+  attachments,
+  onRemove,
+}: {
+  attachments: AttachmentMeta[];
+  onRemove?: (attachment: AttachmentMeta) => void;
+}) {
   if (!attachments.length) return null;
   return (
     <div className="flex flex-wrap gap-2.5 mb-3">
       {attachments.map((a) => {
         const isImage = a.mimeType.startsWith('image/');
         return (
-          <a
-            key={a.url}
-            href={a.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className={cn(
-              "group relative flex items-center gap-2 overflow-hidden rounded-xl border border-background/20 bg-background/5 transition-all hover:bg-background/10 active:scale-[0.98] shadow-sm",
-              isImage ? "h-24 w-24 p-0 shrink-0" : "h-11 px-3 py-2 max-w-[200px]"
+          <div key={a.url} className="relative group">
+            <a
+              href={a.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={cn(
+                'group relative flex items-center gap-2 overflow-hidden rounded-xl border border-background/20 bg-background/5 transition-all hover:bg-background/10 active:scale-[0.98] shadow-sm',
+                isImage
+                  ? 'h-24 w-24 p-0 shrink-0'
+                  : 'h-11 px-3 py-2 max-w-[200px]',
+              )}
+              title={a.name}
+            >
+              {isImage ? (
+                <img
+                  src={a.url}
+                  alt={a.name}
+                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                  loading="lazy"
+                />
+              ) : (
+                <>
+                  <div className="text-background/90 group-hover:text-background transition-colors">
+                    <AttachmentIcon mimeType={a.mimeType} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[11px] font-medium leading-none text-background/90 group-hover:text-background mb-0.5 transition-colors">
+                      {a.name}
+                    </p>
+                    <p className="text-[9px] text-background/40 uppercase font-bold tracking-tight">
+                      {a.mimeType.split('/')[1] || 'FILE'}
+                    </p>
+                  </div>
+                </>
+              )}
+            </a>
+            {onRemove && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onRemove(a);
+                }}
+                className="absolute -right-2 -top-2 z-10 hidden h-5 w-5 items-center justify-center rounded-full bg-destructive text-destructive-foreground shadow-md transition-transform hover:scale-110 group-hover:flex"
+                aria-label="Remove attachment"
+              >
+                <X className="h-3 w-3" />
+              </button>
             )}
-            title={a.name}
-          >
-            {isImage ? (
-              <img
-                src={a.url}
-                alt={a.name}
-                className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                loading="lazy"
-              />
-            ) : (
-              <>
-                <div className="text-background/90 group-hover:text-background transition-colors">
-                  <AttachmentIcon mimeType={a.mimeType} />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-[11px] font-medium leading-none text-background/90 group-hover:text-background mb-0.5 transition-colors">
-                    {a.name}
-                  </p>
-                  <p className="text-[9px] text-background/40 uppercase font-bold tracking-tight">
-                    {a.mimeType.split('/')[1] || 'FILE'}
-                  </p>
-                </div>
-              </>
-            )}
-          </a>
+          </div>
         );
       })}
     </div>

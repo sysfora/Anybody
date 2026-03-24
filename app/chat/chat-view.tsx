@@ -24,6 +24,7 @@ import { Sidebar } from '@/components/Dashboard/Sidebar';
 import { NavigationBar } from '@/components/NavigationBar';
 import {
   ChatMessages,
+  AttachmentPreviews,
   type ChatMessage,
   type AttachmentMeta,
 } from '@/components/Dashboard/ChatMessages';
@@ -158,6 +159,20 @@ export default function ChatView({
   const [projectLoadStatus, setProjectLoadStatus] = useState<string | null>(
     null,
   );
+  const [attachmentMetas, setAttachmentMetas] = useState<AttachmentMeta[]>([]);
+
+  useEffect(() => {
+    const metas = attachments.map((f) => ({
+      name: f.name,
+      url: URL.createObjectURL(f),
+      mimeType: f.type,
+      size: f.size,
+    }));
+    setAttachmentMetas(metas);
+    return () => {
+      metas.forEach((m) => URL.revokeObjectURL(m.url));
+    };
+  }, [attachments]);
 
   const {
     projectName,
@@ -332,8 +347,13 @@ export default function ChatView({
       setProjectName(decodeURIComponent(projectIdFromUrl.trim()));
     } else {
       setProjectName(null);
-      setStatus('completed');
+      setStatus('idle');
       setProjectLoadStatus(null);
+      projectPbIdRef.current = null;
+      projectNameRef.current = null;
+      setChatMessages([]);
+      setHtmlSource('');
+      htmlSourceRef.current = '';
     }
   }, [projectIdFromUrl, setProjectName, setStatus]);
 
@@ -1151,23 +1171,13 @@ export default function ChatView({
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const removeAttachment = (index: number) => {
-    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  const removeAttachment = (attachment: AttachmentMeta) => {
+    setAttachments((prev) =>
+      prev.filter((f) => f.name !== attachment.name || f.size !== attachment.size),
+    );
   };
 
-  /** Icon to show in the attachment chip for non-image files */
-  const getFileChipIcon = (file: File) => {
-    const t = file.type;
-    if (t === 'application/pdf') return <FileText className="h-3 w-3 shrink-0" />;
-    if (
-      t.startsWith('text/') ||
-      t.includes('javascript') ||
-      t.includes('typescript') ||
-      t.includes('json') ||
-      t.includes('xml')
-    ) return <FileCode className="h-3 w-3 shrink-0" />;
-    return <Paperclip className="h-3 w-3 shrink-0" />;
-  };
+
 
   const handleVisibilityChange = async (newVisibility: VisibilityOption) => {
     if (newVisibility === "private") {
@@ -1296,41 +1306,11 @@ export default function ChatView({
               <div className="bg-white dark:bg-black border-2 border-border rounded-2xl p-3 sm:p-4 transition-all duration-300 flex flex-col">
                 {/* Attachment preview strip */}
                 {attachments.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mb-2 pb-2 border-b border-border/50">
-                    {attachments.map((file, idx) => {
-                      const isImage = file.type.startsWith('image/');
-                      return (
-                        <div
-                          key={`${file.name}-${idx}`}
-                          className="relative group/chip flex items-center gap-1.5 rounded-lg border border-border bg-muted/40 text-xs text-foreground overflow-hidden max-w-[160px]"
-                        >
-                          {isImage ? (
-                            <>
-                              {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img
-                                src={URL.createObjectURL(file)}
-                                alt={file.name}
-                                className="h-10 w-10 object-cover rounded-l-lg shrink-0"
-                              />
-                              <span className="truncate pr-1 py-1 text-[11px]">{file.name}</span>
-                            </>
-                          ) : (
-                            <div className="flex items-center gap-1.5 px-2 py-1.5">
-                              {getFileChipIcon(file)}
-                              <span className="truncate text-[11px]">{file.name}</span>
-                            </div>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => removeAttachment(idx)}
-                            className="absolute top-0.5 right-0.5 rounded-full bg-background/80 p-0.5 opacity-0 group-hover/chip:opacity-100 transition-opacity hover:bg-destructive/10 hover:text-destructive"
-                            title={`Remove ${file.name}`}
-                          >
-                            <X className="h-2.5 w-2.5" />
-                          </button>
-                        </div>
-                      );
-                    })}
+                  <div className="px-1 pt-1">
+                    <AttachmentPreviews
+                      attachments={attachmentMetas}
+                      onRemove={removeAttachment}
+                    />
                   </div>
                 )}
                 <div className="flex-1 mb-3 min-h-0">

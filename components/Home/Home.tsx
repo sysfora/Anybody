@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { ArrowUp, Loader2 } from 'lucide-react';
+import { ArrowUp, Loader2, Paperclip } from 'lucide-react';
 import NextImage from 'next/image';
 import LogoFavicon from '@/assets/LogoFavicon.png';
 import { useRouter } from 'next/navigation';
@@ -17,6 +17,8 @@ import pb from "@/lib/pocketbase";
 import { useToast } from "@/hooks/use-toast";
 import { useProject } from "@/context/ProjectContext";
 import { PublicProjects } from "@/components/Home/PublicProjects";
+import { AttachmentPreviews, type AttachmentMeta } from "@/components/Dashboard/ChatMessages";
+import { cn } from "@/lib/utils";
 
 export const Content = () => {
     const router = useRouter();
@@ -29,7 +31,9 @@ export const Content = () => {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSubscriptionPopup, setShowSubscriptionPopup] = useState(false);
     const [subscriptionReason, setSubscriptionReason] = useState<"private_project" | "out_of_limits">("out_of_limits");
+    const [attachments, setAttachments] = useState<File[]>([]);
     const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+    const fileInputRef = React.useRef<HTMLInputElement>(null);
 
     useEffect(() => {
         setMounted(true);
@@ -106,6 +110,68 @@ export const Content = () => {
         typeWriter();
     }, []);
 
+    const toBase64 = (file: File): Promise<string> => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => {
+                const result = reader.result as string;
+                const base64 = result.split(',')[1];
+                resolve(base64);
+            };
+            reader.onerror = (error) => reject(error);
+        });
+    };
+
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(e.target.files || []);
+        if (files.length === 0) return;
+
+        const totalAttachments = attachments.length + files.length;
+        if (totalAttachments > 5) {
+            toast({
+                title: 'Too many files',
+                description: 'You can only attach up to 5 files.',
+                variant: 'destructive',
+            });
+            return;
+        }
+
+        const validFiles = files.filter((f) => {
+            if (f.size > 5 * 1024 * 1024) {
+                toast({
+                    title: 'File too large',
+                    description: `${f.name} exceeds the 5MB limit.`,
+                    variant: 'destructive',
+                });
+                return false;
+            }
+            return true;
+        });
+
+        setAttachments((prev) => [...prev, ...validFiles]);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    const handleRemoveAttachment = (attachment: AttachmentMeta) => {
+        setAttachments((prev) => prev.filter((f) => f.name !== attachment.name || f.size !== attachment.size));
+    };
+
+    const [attachmentMetas, setAttachmentMetas] = useState<AttachmentMeta[]>([]);
+
+    useEffect(() => {
+        const metas = attachments.map((f) => ({
+            name: f.name,
+            url: URL.createObjectURL(f),
+            mimeType: f.type,
+            size: f.size,
+        }));
+        setAttachmentMetas(metas);
+        return () => {
+            metas.forEach((m) => URL.revokeObjectURL(m.url));
+        };
+    }, [attachments]);
+
     const handleBuild = async () => {
         const message = appIdea.trim();
         if (!message) return;
@@ -139,10 +205,20 @@ export const Content = () => {
         }
 
         setIsSubmitting(true);
+
+        const pendingFiles = await Promise.all(
+            attachments.map(async (f) => ({
+                name: f.name,
+                type: f.type,
+                size: f.size,
+                data: await toBase64(f),
+            })),
+        );
+
         setPendingSubmission({
             message,
             visibility,
-            files: [],
+            files: pendingFiles,
         });
         router.push('/chat');
     };
@@ -227,7 +303,15 @@ export const Content = () => {
                 {/* Input */}
                 <div className="max-w-2xl mx-auto px-4 sm:px-0">
                     <div className="relative group">
-                        <div className="bg-white dark:bg-black border-2 border-border rounded-2xl p-3 sm:p-4 hover:border-[#da2a1d] hover:shadow-[0_0_30px_rgba(218,42,29,0.6)] focus-within:border-[#da2a1d] focus-within:shadow-[0_0_30px_rgba(218,42,29,0.6)] transition-all duration-300 max-h-[200px] sm:max-h-[250px] flex flex-col">
+                        <div className="bg-white dark:bg-black border-2 border-border rounded-2xl p-3 sm:p-4 hover:border-[#da2a1d] hover:shadow-[0_0_30px_rgba(218,42,29,0.6)] focus-within:border-[#da2a1d] focus-within:shadow-[0_0_30px_rgba(218,42,29,0.6)] transition-all duration-300 max-h-[350px] sm:max-h-[400px] flex flex-col">
+                            {attachments.length > 0 && (
+                                <div className="px-1 pt-1">
+                                    <AttachmentPreviews
+                                        attachments={attachmentMetas}
+                                        onRemove={handleRemoveAttachment}
+                                    />
+                                </div>
+                            )}
                             <div className="flex-1 mb-3 min-h-0">
                                 <Textarea
                                     ref={textareaRef}
@@ -244,10 +328,28 @@ export const Content = () => {
                                 />
                             </div>
                             <div className="flex items-center justify-between flex-shrink-0">
-                                <VisibilityDropdown
-                                    value={visibility}
-                                    onValueChange={handleVisibilityChange}
-                                />
+                                <div className="flex items-center gap-2">
+                                    <input
+                                        type="file"
+                                        ref={fileInputRef}
+                                        onChange={handleFileChange}
+                                        multiple
+                                        className="hidden"
+                                    />
+                                    <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        type="button"
+                                        onClick={() => fileInputRef.current?.click()}
+                                        className="h-8 w-8 rounded-full text-muted-foreground hover:bg-muted"
+                                    >
+                                        <Paperclip className="h-4 w-4" />
+                                    </Button>
+                                    <VisibilityDropdown
+                                        value={visibility}
+                                        onValueChange={handleVisibilityChange}
+                                    />
+                                </div>
                                 <Button
                                     variant="default"
                                     size="icon"
