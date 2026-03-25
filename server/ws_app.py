@@ -287,6 +287,7 @@ async def _stream_generation(
     request_id: str,
     project_id: str | None = None,
     user_message_id: str | None = None,
+    attachments: list[dict] | None = None,
 ) -> None:
     assistant_message_id: str | None = None
     cm = None
@@ -353,6 +354,7 @@ async def _stream_generation(
                 service=service,
                 user_text=user_text,
                 existing_html=existing_html,
+                attachments=attachments or [],
                 request_id=request_id,
                 project_id=project_id,
                 emit_target=emit_target,
@@ -543,6 +545,7 @@ async def _run_ai_generation(
     service: AIService,
     user_text: str,
     existing_html: str,
+    attachments: list[dict],
     request_id: str,
     project_id: str | None,
     emit_target: str,
@@ -639,10 +642,50 @@ async def _run_ai_generation(
     # Optimizer only runs on short new prompts, not on modifications
     prompt = user_text if is_modification else await _maybe_optimize_prompt(service, user_text)
 
+    def _make_user_message(text: str) -> dict:
+        """Return an OpenAI-style user message, multimodal when attachments exist.
+
+        Text-based attachments (kind="text") are appended inline to the prompt
+        so every model can read them without vision support.
+        Image attachments (kind="image") are added as multimodal content blocks.
+        """
+        if not attachments:
+            return {"role": "user", "content": text}
+
+        # 1. Append text-file contents directly into the prompt string.
+        text_parts = [text]
+        image_blocks: list[dict] = []
+
+        for att in attachments:
+            kind = att.get("kind", "")
+            name = att.get("name", "attachment")
+            if kind == "text":
+                file_text = att.get("text", "")
+                text_parts.append(
+                    f"\n\n--- Attachment: {name} ---\n{file_text}\n--- End of {name} ---"
+                )
+            elif kind == "image":
+                mime = att.get("mimeType", "image/jpeg")
+                b64 = att.get("base64", "")
+                if b64:
+                    image_blocks.append(
+                        {"type": "image", "media_type": mime, "data": b64}
+                    )
+
+        full_text = "".join(text_parts)
+
+        # 2. If no images, plain string content is enough (works on all models).
+        if not image_blocks:
+            return {"role": "user", "content": full_text}
+
+        # 3. With images, build a multimodal content list.
+        parts: list[dict] = [{"type": "text", "text": full_text}] + image_blocks
+        return {"role": "user", "content": parts}
+
     # ── Branch A: full generation ──────────────────────────────────────────
     if not is_modification:
         parser = StreamParser()
-        chat_messages = history + [{"role": "user", "content": prompt}]
+        chat_messages = history + [_make_user_message(prompt)]
 
         try:
             async for ai_chunk in service.complete_stream(
@@ -697,7 +740,7 @@ async def _run_ai_generation(
 
             cont_messages = (
                 history
-                + [{"role": "user", "content": prompt}]
+                + [_make_user_message(prompt)]
                 + [
                     {
                         "role": "assistant",
@@ -764,17 +807,21 @@ async def _run_ai_generation(
 
     for iteration in range(MAX_PATCH_ITERATIONS):
         if iteration == 0:
-            user_content = (
+            user_content_text = (
                 f"Current page HTML:\n```html\n{current_html}\n```\n\n"
                 f"User request: {prompt}"
             )
+            # First iteration may include image attachments (screenshot / mockup).
+            call_user_msg = _make_user_message(user_content_text)
         else:
-            user_content = (
+            user_content_text = (
                 f"Updated HTML after your patches:\n```html\n{current_html}\n```\n\n"
                 "Please continue making the remaining requested changes."
             )
+            # Continuation turns are text-only — images were already sent in iter 0.
+            call_user_msg = {"role": "user", "content": user_content_text}
 
-        call_messages = iter_messages + [{"role": "user", "content": user_content}]
+        call_messages = iter_messages + [call_user_msg]
         parser = ModifyStreamParser()
 
         try:
@@ -805,26 +852,55 @@ async def _run_ai_generation(
         except (AINoKeysError, AIAllFailedError) as exc:
             raise RuntimeError(str(exc)) from exc
 
-        # Apply the patches collected by the parser
-        patch_count = 0
-        for find_text, replace_text in parser.patches:
-            if find_text and find_text in current_html:
-                current_html = current_html.replace(find_text, replace_text, 1)
-                patch_count += 1
-            else:
-                logger.warning(
-                    "ws_app: patch FIND text not found (%.80r…)", find_text
-                )
-        logger.info(
-            "ws_app: iteration %d — applied %d/%d patch(es)",
-            iteration + 1, patch_count, len(parser.patches),
-        )
+        # Apply the patches collected by the parser.
+        # Fallback: if the model ignored the patch format and returned a full
+        # HTML block instead, use that directly (avoids returning unchanged HTML).
+        if not parser.patches and parser.full_html:
+            logger.info(
+                "ws_app: iteration %d — model returned full HTML instead of "
+                "patches (%d chars); using it directly",
+                iteration + 1, len(parser.full_html),
+            )
+            current_html = parser.full_html
+        else:
+            patch_count = 0
+            for find_text, replace_text in parser.patches:
+                if not find_text:
+                    continue
+                if find_text in current_html:
+                    current_html = current_html.replace(find_text, replace_text, 1)
+                    patch_count += 1
+                else:
+                    # Fallback: normalize line endings and try again
+                    normalized_html = current_html.replace("\r\n", "\n").replace("\r", "\n")
+                    normalized_find = find_text.replace("\r\n", "\n").replace("\r", "\n")
+                    if normalized_find in normalized_html:
+                        idx = normalized_html.index(normalized_find)
+                        current_html = (
+                            current_html[:idx]
+                            + replace_text
+                            + current_html[idx + len(normalized_find):]
+                        )
+                        patch_count += 1
+                        logger.info(
+                            "ws_app: patch applied after line-ending normalization (%.80r…)",
+                            find_text,
+                        )
+                    else:
+                        logger.warning(
+                            "ws_app: patch FIND text not found (%.80r…)", find_text
+                        )
+            logger.info(
+                "ws_app: iteration %d — applied %d/%d patch(es)",
+                iteration + 1, patch_count, len(parser.patches),
+            )
 
         if parser.is_done or not parser.wants_continuation:
             break
 
-        # Another iteration — give the AI context of what changed
-        iter_messages.append({"role": "user", "content": user_content})
+        # Another iteration — give the AI context of what changed.
+        # Use text-only for history entries (images already sent in iter 0).
+        iter_messages.append({"role": "user", "content": user_content_text})
         iter_messages.append({"role": "assistant", "content": ""})  # placeholder
 
     # Stream the final patched HTML to client as code_chunks
@@ -903,7 +979,7 @@ async def user_message(sid, data):
         return
 
     t = asyncio.create_task(
-        _stream_generation(sid, text, request_id, project_id, user_message_id)
+        _stream_generation(sid, text, request_id, project_id, user_message_id, attachments)
     )
     _generation_tasks[request_id] = t
 

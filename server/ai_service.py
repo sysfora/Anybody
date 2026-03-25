@@ -121,6 +121,50 @@ class ApiKey:
                 h["X-Title"] = "AnyCoder"
         return h
 
+    # ------------------------------------------------------------------
+    # Multimodal content helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _to_openai_content(content: Any) -> Any:
+        """Convert internal content to OpenAI/OpenRouter multimodal format."""
+        if not isinstance(content, list):
+            return content  # plain string — unchanged
+        parts = []
+        for block in content:
+            btype = block.get("type")
+            if btype == "text":
+                parts.append({"type": "text", "text": block.get("text", "")})
+            elif btype == "image":
+                mime = block.get("media_type", "image/jpeg")
+                data = block.get("data", "")
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{data}"},
+                })
+        return parts
+
+    @staticmethod
+    def _to_anthropic_content(content: Any) -> Any:
+        """Convert internal content to Anthropic multimodal format."""
+        if not isinstance(content, list):
+            return content
+        parts = []
+        for block in content:
+            btype = block.get("type")
+            if btype == "text":
+                parts.append({"type": "text", "text": block.get("text", "")})
+            elif btype == "image":
+                parts.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": block.get("media_type", "image/jpeg"),
+                        "data": block.get("data", ""),
+                    },
+                })
+        return parts
+
     def build_payload(
         self,
         messages: list[dict[str, Any]],
@@ -130,11 +174,15 @@ class ApiKey:
     ) -> dict[str, Any]:
         if self.provider == "Anthropic":
             # Anthropic: separate system prompt + no system-role messages
-            anthropic_messages = [m for m in messages if m.get("role") != "system"]
             sys_prompt = system or next(
                 (m["content"] for m in messages if m.get("role") == "system"),
                 None,
             )
+            anthropic_messages = [
+                {**m, "content": self._to_anthropic_content(m["content"])}
+                for m in messages
+                if m.get("role") != "system"
+            ]
             payload: dict[str, Any] = {
                 "model": self.model,
                 "messages": anthropic_messages,
@@ -145,11 +193,15 @@ class ApiKey:
                 payload["system"] = sys_prompt
         else:
             # OpenAI / OpenRouter: system goes as first message
-            oai_messages = [m for m in messages if m.get("role") != "system"]
             sys_prompt = system or next(
                 (m["content"] for m in messages if m.get("role") == "system"),
                 None,
             )
+            oai_messages = [
+                {**m, "content": self._to_openai_content(m["content"])}
+                for m in messages
+                if m.get("role") != "system"
+            ]
             if sys_prompt:
                 oai_messages = [{"role": "system", "content": sys_prompt}] + oai_messages
             payload = {
@@ -310,6 +362,7 @@ class ModifyStreamParser:
     message ──(<thinking>)────► thinking    ──(</thinking>)──► message
     message ──(<<<FIND>>>)────► patch_find  ──(<<<REPLACE>>>)─► patch_replace
     patch_replace ──(<<<END>>>)─────────────────────────────► message
+    message ──(```html)────────► full_html  ──(```)──────────► message
     any     ──(&&&DONE&&& | &&&CONTINUE&&&)──────────────────► done
 
     Segment types emitted:
@@ -318,16 +371,22 @@ class ModifyStreamParser:
 
     Patch data is NOT emitted as events; it is accumulated in ``.patches``
     as a list of ``(find_text, replace_text)`` tuples ready to apply.
+    When the model ignores the patch format and outputs a full HTML block
+    instead, the HTML is stored in ``.full_html`` as a fallback.
     Use ``.wants_continuation`` to check for &&&CONTINUE&&& and
     ``.is_done`` for &&&DONE&&&.
     """
+
+    _CODE_FENCE_RE = re.compile(r"^```\s*html", re.IGNORECASE)
 
     def __init__(self) -> None:
         self._state = "message"
         self._buf = ""
         self._find_acc = ""
         self._replace_acc = ""
+        self._full_html_acc = ""
         self.patches: list[tuple[str, str]] = []
+        self.full_html: str = ""
         self.is_done = False
         self.wants_continuation = False
 
@@ -356,6 +415,10 @@ class ModifyStreamParser:
             if stripped == "<<<FIND>>>":
                 self._state = "patch_find"
                 self._find_acc = ""
+                return []
+            if self._CODE_FENCE_RE.match(stripped):
+                self._state = "full_html"
+                self._full_html_acc = ""
                 return []
             if "&&&DONE&&&" in stripped:
                 self.is_done = True
@@ -390,6 +453,20 @@ class ModifyStreamParser:
                 self._state = "message"
                 return []
             self._replace_acc += line
+            return []
+        elif self._state == "full_html":
+            if stripped == "```":
+                self.full_html = self._full_html_acc
+                self._full_html_acc = ""
+                self._state = "message"
+                return []
+            if "&&&DONE&&&" in stripped:
+                self.full_html = self._full_html_acc
+                self._full_html_acc = ""
+                self.is_done = True
+                self._state = "done"
+                return []
+            self._full_html_acc += line
             return []
         return []  # done
 

@@ -1117,12 +1117,57 @@ export default function ChatView({
         }
       }
 
+      // Read every attachment so the AI gets the full context:
+      //   • images   → raw base64 (sent as multimodal vision blocks)
+      //   • all else → UTF-8 text (appended inline to the prompt)
+      // Large text files are truncated to 50 000 characters to stay within
+      // model context limits.
+      const TEXT_TRUNCATE = 50_000;
+      type AiAttachment =
+        | { kind: 'image'; name: string; mimeType: string; base64: string }
+        | { kind: 'text';  name: string; mimeType: string; text: string };
+      const aiAttachments: AiAttachment[] = [];
+
+      for (const f of pendingFiles) {
+        try {
+          if (f.type.startsWith('image/')) {
+            const base64 = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const result = reader.result as string;
+                resolve(result.split(',')[1] ?? '');
+              };
+              reader.onerror = reject;
+              reader.readAsDataURL(f);
+            });
+            aiAttachments.push({ kind: 'image', name: f.name, mimeType: f.type, base64 });
+          } else {
+            const text = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve((reader.result as string) ?? '');
+              reader.onerror = reject;
+              reader.readAsText(f);
+            });
+            aiAttachments.push({
+              kind: 'text',
+              name: f.name,
+              mimeType: f.type || 'text/plain',
+              text: text.length > TEXT_TRUNCATE
+                ? text.slice(0, TEXT_TRUNCATE) + '\n[...truncated]'
+                : text,
+            });
+          }
+        } catch {
+          /* non-fatal — skip this attachment if reading fails */
+        }
+      }
+
       socket.emit('user_message', {
         text: userContent,
         request_id: requestId,
         ...(pocketbaseProjectId ? { project_id: pocketbaseProjectId } : {}),
         ...(preCreatedUserMessageId ? { user_message_id: preCreatedUserMessageId } : {}),
-        attachments: pendingFiles.map((f) => ({ name: f.name, size: f.size })),
+        attachments: aiAttachments,
       });
 
       // Deduct credit and trigger auto-reload if needed (fire-and-forget)
