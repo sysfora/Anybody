@@ -298,7 +298,26 @@ async def _render_html_to_preview_jpeg(html: str) -> bytes:
 
 
 async def _upload_preview_to_next(project_id: str, jpeg_bytes: bytes) -> None:
-    app_url = (os.environ.get("NEXT_PUBLIC_APP_URL") or "http://localhost:3000").rstrip("/")
+    # Prefer explicit envs, then fall back to using the PocketBase origin as
+    # the likely host for the Next app (common in this repo's deployments).
+    raw_app_url = (
+        os.environ.get("PREVIEW_APP_URL")
+        or os.environ.get("NEXT_PUBLIC_APP_URL")
+        or ""
+    ).strip()
+    raw_pb_url = (
+        os.environ.get("POCKETBASE_URL") or os.environ.get("NEXT_PUBLIC_POCKETBASE_URL") or ""
+    ).strip()
+
+    def _origin(url: str) -> str:
+        from urllib.parse import urlparse
+
+        u = urlparse(url)
+        if not u.scheme or not u.netloc:
+            return ""
+        return f"{u.scheme}://{u.netloc}".rstrip("/")
+
+    app_url = (raw_app_url and _origin(raw_app_url)) or (_origin(raw_pb_url)) or "http://localhost:3000"
     secret = os.environ.get("PREVIEW_WORKER_SECRET") or ""
     headers: dict[str, str] = {}
     if secret:
@@ -306,13 +325,20 @@ async def _upload_preview_to_next(project_id: str, jpeg_bytes: bytes) -> None:
 
     timeout_s = 120.0
     async with httpx.AsyncClient(timeout=timeout_s) as client:
-        resp = await client.post(
-            f"{app_url}/api/projects/preview",
-            data={"project_id": project_id},
-            files={"preview": ("preview.jpg", jpeg_bytes, "image/jpeg")},
-            headers=headers,
-        )
-        resp.raise_for_status()
+        preview_api_url = f"{app_url}/api/projects/preview"
+        try:
+            resp = await client.post(
+                preview_api_url,
+                data={"project_id": project_id},
+                files={"preview": ("preview.jpg", jpeg_bytes, "image/jpeg")},
+                headers=headers,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            # Add URL context so logs point at misconfigured env.
+            raise RuntimeError(
+                f"preview upload failed url={preview_api_url} project_id={project_id}"
+            ) from e
 
 
 async def _preview_worker_loop() -> None:
