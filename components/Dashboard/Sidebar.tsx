@@ -118,7 +118,7 @@ export function Sidebar() {
         <div className="flex h-full flex-col items-center pt-3 pb-4">
           {/* Logo */}
           <Link
-            href="/chat"
+            href="/"
             className="mb-8 flex items-center justify-center"
           >
             <Image

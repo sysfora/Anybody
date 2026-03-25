@@ -30,6 +30,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Source project not found' }, { status: 404 });
     }
 
+    if (sourceProject.visibility === 'private') {
+      return NextResponse.json({ error: 'Private projects cannot be remixed' }, { status: 403 });
+    }
+
     const effectiveUserId = await getEffectiveUserId(session.id);
     
     // 2. Generate a unique 3-word name for the remixed project
