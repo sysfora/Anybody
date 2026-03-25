@@ -34,7 +34,7 @@ const Footer = () => {
     ];
 
     return (
-        <footer className="fixed bottom-0 left-0 right-0 z-50 border-t border-border/40 bg-white/80 dark:bg-black/80 backdrop-blur-lg py-3 sm:py-4">
+        <footer className="relative sm:fixed sm:bottom-0 sm:left-0 sm:right-0 z-50 border-t border-border/40 bg-white/80 dark:bg-black/80 backdrop-blur-lg py-3 sm:py-4">
             <div className="container mx-auto px-6">
                 <div className="flex flex-col md:flex-row items-center justify-between gap-2 md:gap-4">
                     {/* Left side - Legal links */}

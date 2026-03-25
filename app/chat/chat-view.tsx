@@ -13,7 +13,6 @@ import {
   ArrowUp,
   Plus,
   Rocket,
-  Eye,
   Square,
   Paperclip,
   X,
@@ -173,6 +172,8 @@ export default function ChatView({
     setChatVisibility,
     shouldAutoSubmit,
     setShouldAutoSubmit,
+    mobileShowPreview,
+    setMobileShowPreview,
   } = useProject();
 
   useEffect(() => {
@@ -838,6 +839,7 @@ export default function ChatView({
     setProjectName(null);
     setStatus('completed');
     setProjectLoadStatus(null);
+    setMobileShowPreview(false);
     // Clear saved prompt and last-slug so returning to /chat starts fresh.
     clearPrompt(projectIdFromUrlRef.current?.trim());
     clearLastChatSlug();
@@ -1206,8 +1208,11 @@ export default function ChatView({
     <div className="flex h-screen flex-col bg-background">
       <Sidebar />
       <NavigationBar variant="chat" />
-      <div className="flex h-full flex-col lg:flex-row md:ml-16">
-        <div className="w-full lg:w-96 flex flex-col h-full border-r border-border bg-card overflow-hidden">
+      <div className="flex h-full flex-col lg:flex-row md:ml-16 overflow-hidden">
+        <div className={cn(
+          "w-full lg:w-96 flex-col h-full border-r border-border bg-card overflow-hidden",
+          mobileShowPreview ? "hidden lg:flex" : "flex",
+        )}>
           <div className="flex items-center justify-between border-b border-border px-4 h-14 flex-shrink-0 m-0">
             {hasProject ? (
               <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -1228,16 +1233,18 @@ export default function ChatView({
                 New Project
               </span>
             )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleNewProject}
-              disabled={!canStartNewProject}
-              className="h-7 gap-1.5 px-2 text-xs flex-shrink-0"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>New Project</span>
-            </Button>
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleNewProject}
+                disabled={!canStartNewProject}
+                className="h-7 gap-1.5 px-2 text-xs"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>New</span>
+              </Button>
+            </div>
           </div>
 
           <div
@@ -1281,7 +1288,7 @@ export default function ChatView({
             )}
           </div>
 
-          <div className="border-t border-border p-4 flex-shrink-0">
+          <div className="border-t border-border p-4 pb-20 md:pb-4 flex-shrink-0">
             {/* Hidden file input */}
             <input
               ref={fileInputRef}
@@ -1375,10 +1382,13 @@ export default function ChatView({
 
         <div
           id="preview-container"
-          className="flex-1 flex flex-col min-h-0 bg-card overflow-hidden pt-14"
+          className={cn(
+            "relative flex-1 flex-col min-h-0 bg-card overflow-hidden pt-14",
+            mobileShowPreview ? "flex" : "hidden lg:flex",
+          )}
         >
           {viewMode === 'code' ? (
-            <div className="flex h-full w-full flex-col min-h-0 p-4">
+            <div className="flex h-full w-full flex-col min-h-0 p-4 pb-20 md:pb-4">
               <div
                 ref={codeScrollRef}
                 onScroll={onCodeScroll}
@@ -1433,7 +1443,7 @@ export default function ChatView({
               </div>
             </div>
           ) : (
-            <div className="h-full w-full flex items-center justify-center bg-muted/30 p-4">
+            <div className="h-full w-full flex items-center justify-center bg-muted/30 p-4 pb-20 md:pb-4">
               {previewUrl ? (
                 <div
                   id="iframe-container"

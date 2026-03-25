@@ -20,6 +20,8 @@ interface ProjectContextType {
   chatAttachments: File[]
   chatVisibility: VisibilityOption
   shouldAutoSubmit: boolean
+  /** Mobile/tablet only: whether the preview panel is shown instead of the chat panel. */
+  mobileShowPreview: boolean
   setProjectName: (name: string | null) => void
   setUserId: (id: string | null) => void
   setStatus: (status: ProjectStatus) => void
@@ -31,6 +33,7 @@ interface ProjectContextType {
   setChatAttachments: React.Dispatch<React.SetStateAction<File[]>>
   setChatVisibility: (visibility: VisibilityOption) => void
   setShouldAutoSubmit: (submit: boolean) => void
+  setMobileShowPreview: (show: boolean) => void
   refreshPreview: () => void
   setRefreshCallback: (callback: (() => void) | null) => void
 }
@@ -49,6 +52,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [chatAttachments, setChatAttachments] = useState<File[]>([])
   const [chatVisibility, setChatVisibility] = useState<VisibilityOption>("public")
   const [shouldAutoSubmit, setShouldAutoSubmit] = useState(false)
+  const [mobileShowPreview, setMobileShowPreview] = useState(false)
 
   const refreshCallbackRef = useRef<(() => void) | null>(null)
 
@@ -84,6 +88,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         chatAttachments,
         chatVisibility,
         shouldAutoSubmit,
+        mobileShowPreview,
         setProjectName,
         setUserId,
         setStatus,
@@ -95,6 +100,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         setChatAttachments,
         setChatVisibility,
         setShouldAutoSubmit,
+        setMobileShowPreview,
         refreshPreview,
         setRefreshCallback,
       }}

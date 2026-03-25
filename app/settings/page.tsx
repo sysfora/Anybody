@@ -16,8 +16,8 @@ function SettingsPageContent() {
     <div className="min-h-screen">
       <NavigationBar variant="sidebar" />
       <Sidebar />
-      <main className="ml-16 pt-16">
-        <div className="h-[calc(100vh-4rem)] overflow-auto" id="settings-scroll-container">
+      <main className="md:ml-16 pt-14">
+        <div className="h-[calc(100vh-3.5rem)] overflow-auto pb-16 md:pb-0" id="settings-scroll-container">
           <div className="mx-auto max-w-4xl p-8">
             <div className="mb-8">
               <h1 className="mb-2 font-bold text-3xl">Settings</h1>

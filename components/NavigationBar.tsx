@@ -15,7 +15,9 @@ import {
   Rocket,
   Copy,
   Check,
-  Loader2
+  Loader2,
+  MessageSquare,
+  ChevronRight,
 } from 'lucide-react';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
@@ -46,7 +48,9 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
     setViewMode,
     setDeviceSize,
     setIsFullscreen,
-    refreshPreview
+    refreshPreview,
+    mobileShowPreview,
+    setMobileShowPreview,
   } = useProject();
 
   const hasProject = !!projectName && !!userId;
@@ -318,11 +322,47 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
     return (
       <>
       <nav className="fixed top-0 left-0 md:left-16 lg:left-[calc(4rem+24rem)] right-0 z-50 border-b border-border bg-background h-14">
-        <div className="flex h-full items-center justify-between px-4">
-          {/* Left: View Toggle & Device Size */}
-          <div className="flex items-center gap-2">
-            {/* View Toggle */}
-            <div className="flex items-center rounded-lg border border-border p-0.5">
+        <div className="flex h-full items-center justify-between px-3 sm:px-4">
+          {/* Left: mobile panel toggle + View Toggle + Device Size */}
+          <div className="flex items-center gap-1.5 sm:gap-2">
+
+            {/* Mobile/tablet: Chat ↔ Preview panel toggle (hidden on desktop where both panels are always visible) */}
+            <div className="flex lg:hidden items-center rounded-lg border border-border p-0.5">
+              <button
+                onClick={() => setMobileShowPreview(false)}
+                className={cn(
+                  "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors",
+                  !mobileShowPreview
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <MessageSquare className="h-3.5 w-3.5 shrink-0" />
+                <span className="sm:inline">Chat</span>
+              </button>
+              <button
+                onClick={() => setMobileShowPreview(true)}
+                className={cn(
+                  "relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors",
+                  mobileShowPreview
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <Eye className="h-3.5 w-3.5 shrink-0" />
+                <span className="sm:inline">Preview</span>
+                {/* Pulse indicator when code is being generated */}
+                {isWorking && !mobileShowPreview && (
+                  <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-primary animate-pulse" />
+                )}
+              </button>
+            </div>
+
+            {/* Code / Preview view toggle (desktop always, mobile only when on preview panel) */}
+            <div className={cn(
+              "items-center rounded-lg border border-border p-0.5",
+              mobileShowPreview ? "flex" : "hidden lg:flex",
+            )}>
               <button
                 onClick={() => setViewMode('code')}
                 className={cn(
@@ -349,8 +389,8 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
               </button>
             </div>
 
-            {/* Device Size Buttons */}
-            <div className="flex items-center gap-0.5 rounded-lg border border-border p-0.5">
+          {/* Device Size Buttons – hidden on mobile where preview is full-screen */}
+            <div className="hidden sm:flex items-center gap-0.5 rounded-lg border border-border p-0.5">
               <button
                 onClick={() => setDeviceSize('mobile')}
                 disabled={!hasProject || viewMode !== 'preview'}
@@ -401,7 +441,7 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
               size="sm"
               onClick={refreshPreview}
               disabled={!hasProject}
-              className="h-8 w-8 p-0"
+              className="hidden sm:flex h-8 w-8 p-0"
               title="Refresh"
             >
               <RefreshCw className="h-3.5 w-3.5" />
@@ -410,13 +450,13 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
 
           {/* Right: Actions */}
           <div className="flex items-center gap-1">
-            {/* Fullscreen */}
+            {/* Fullscreen – hidden on mobile */}
             <Button
               variant="ghost"
               size="sm"
               onClick={toggleFullscreen}
               disabled={!hasProject}
-              className="h-8 w-8 p-0"
+              className="hidden sm:flex h-8 w-8 p-0"
               title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
             >
               {isFullscreen ? (
@@ -462,7 +502,7 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
               size="sm"
               onClick={handleDownload}
               disabled={demoMode || !hasProject || isWorking || isDownloading}
-              className="h-8 gap-1.5 px-3 flex items-center"
+              className="hidden sm:flex h-8 gap-1.5 px-3 items-center"
               title={demoMode ? 'Not available in demo' : 'Download project'}
             >
               {isDownloading ? (
@@ -624,8 +664,8 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
             </button>
           </div>
 
-          {/* Device Size Buttons */}
-          <div className="flex items-center gap-0.5 rounded-lg border border-border p-0.5">
+          {/* Device Size Buttons – hidden on mobile */}
+          <div className="hidden sm:flex items-center gap-0.5 rounded-lg border border-border p-0.5">
             <button
               onClick={() => setDeviceSize('mobile')}
               disabled={!hasProject || viewMode !== 'preview'}
@@ -670,13 +710,13 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
             </button>
           </div>
 
-          {/* Refresh Button */}
+          {/* Refresh Button – hidden on mobile */}
           <Button
             variant="ghost"
             size="sm"
             onClick={refreshPreview}
             disabled={!hasProject}
-            className="h-8 w-8 p-0"
+            className="hidden sm:flex h-8 w-8 p-0"
             title="Refresh"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -685,13 +725,13 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
 
         {/* Right: Actions */}
         <div className="flex items-center gap-1">
-          {/* Fullscreen */}
+          {/* Fullscreen – hidden on mobile */}
           <Button
             variant="ghost"
             size="sm"
             onClick={toggleFullscreen}
             disabled={!hasProject}
-            className="h-8 w-8 p-0"
+            className="hidden sm:flex h-8 w-8 p-0"
             title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
           >
             {isFullscreen ? (
@@ -731,13 +771,13 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
             <span className="hidden lg:inline text-xs">Deploy</span>
           </Button>
 
-          {/* Download */}
+          {/* Download – hidden on mobile */}
           <Button
             variant="outline"
             size="sm"
             onClick={handleDownload}
             disabled={!hasProject || isWorking || isDownloading}
-            className="h-8 gap-1.5 px-3 flex items-center"
+            className="hidden sm:flex h-8 gap-1.5 px-3 items-center"
             title="Download project"
           >
             {isDownloading ? (

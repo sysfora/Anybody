@@ -351,7 +351,7 @@ export const Home = () => {
             <Background />
             <div className="min-h-screen flex flex-col relative overflow-x-hidden">
                 <Navbar />
-                <main className="flex-1 bg-transparent pb-20">
+                <main className="flex-1 bg-transparent sm:pb-20">
                     <Content />
                     <PublicProjects />
                 </main>

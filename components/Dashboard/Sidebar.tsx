@@ -133,7 +133,7 @@ export function Sidebar() {
           {/* Navigation */}
           <nav className="flex flex-1 flex-col gap-2">
             {navItems.map((item) => {
-              const isActive = pathname === item.href
+              const isActive = pathname === item.href || pathname.startsWith(item.href + '/')
               return (
                 <Tooltip key={item.href}>
                   <TooltipTrigger asChild>
@@ -224,9 +224,9 @@ export function Sidebar() {
         </div>
       </aside>
 
-      <nav className="fixed bottom-0 left-0 right-0 z-50 flex items-center justify-around border-t border-sidebar-border bg-sidebar py-2 md:hidden">
+      <nav className="fixed bottom-0 left-0 right-0 z-50 flex h-16 items-center justify-around border-t border-sidebar-border bg-sidebar md:hidden">
         {navItems.map((item) => {
-          const isActive = pathname === item.href
+          const isActive = pathname === item.href || pathname.startsWith(item.href + '/')
           return (
             <Link
               key={item.href}

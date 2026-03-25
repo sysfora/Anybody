@@ -258,8 +258,8 @@ export default function SubscriptionPage() {
       <div className="min-h-screen">
         <NavigationBar variant="sidebar" />
         <Sidebar />
-        <main className="ml-16 pt-16">
-          <div className="h-[calc(100vh-4rem)] overflow-auto flex items-center justify-center">
+        <main className="md:ml-16 pt-14">
+          <div className="h-[calc(100vh-3.5rem)] overflow-auto flex items-center justify-center">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
           </div>
         </main>
@@ -279,8 +279,8 @@ export default function SubscriptionPage() {
     <div className="min-h-screen">
       <NavigationBar variant="sidebar" />
       <Sidebar />
-      <main className="ml-16 pt-16">
-        <div className="h-[calc(100vh-4rem)] overflow-auto">
+      <main className="md:ml-16 pt-14">
+        <div className="h-[calc(100vh-3.5rem)] overflow-auto">
           <div className="flex items-center justify-center p-4 bg-background pb-16 md:pb-32">
             <div className="w-full max-w-5xl px-6">
         <div className="mx-auto max-w-2xl space-y-6 text-center mb-12 md:mb-24 pt-8 md:pt-12">
