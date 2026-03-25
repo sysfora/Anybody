@@ -11,6 +11,7 @@ import {
 import { flushSync } from 'react-dom';
 import {
   ArrowUp,
+  Loader2,
   Plus,
   Rocket,
   Square,
@@ -146,11 +147,15 @@ export default function ChatView({
   const htmlSourceRef = useRef('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // True once the first code_chunk for the current generation has arrived.
+  // Used to wipe old HTML exactly once so the new code replaces it cleanly.
+  const firstCodeChunkRef = useRef(false);
 
   const [projectLoadStatus, setProjectLoadStatus] = useState<string | null>(
     null,
   );
   const [attachmentMetas, setAttachmentMetas] = useState<AttachmentMeta[]>([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const {
     projectName,
@@ -677,6 +682,7 @@ export default function ChatView({
       // assistant_reply / generation_done events are routed correctly.
       pendingAssistantIdRef.current = pendingId;
       pendingRequestIdRef.current = payload.request_id ?? null;
+      firstCodeChunkRef.current = false;
       setStatus('generating');
       setProjectLoadStatus('generating');
       clearGenerationWatchdog();
@@ -687,6 +693,8 @@ export default function ChatView({
       chunk: string;
     }) => {
       if (payload.request_id !== pendingRequestIdRef.current) return;
+      // Server is alive — cancel the "no response" watchdog on first chunk.
+      clearGenerationWatchdog();
       const aid = pendingAssistantIdRef.current;
       if (!aid) return;
       setChatMessages((prev) =>
@@ -698,10 +706,28 @@ export default function ChatView({
       );
     };
 
+    const onMessageChunk = (payload: { request_id: string; chunk: string }) => {
+      if (payload.request_id !== pendingRequestIdRef.current) return;
+      clearGenerationWatchdog();
+      const aid = pendingAssistantIdRef.current;
+      if (!aid) return;
+      setChatMessages((prev) =>
+        prev.map((m) =>
+          m.id === aid
+            ? { ...m, content: (m.content ?? '') + payload.chunk }
+            : m,
+        ),
+      );
+    };
+
     const onCodeChunk = (payload: { request_id: string; chunk: string }) => {
       if (payload.request_id !== pendingRequestIdRef.current) return;
+      clearGenerationWatchdog();
       setHtmlSource((prev) => {
-        const next = prev + payload.chunk;
+        // First code chunk clears the previous HTML so new output starts fresh.
+        const base = firstCodeChunkRef.current ? prev : '';
+        firstCodeChunkRef.current = true;
+        const next = base + payload.chunk;
         htmlSourceRef.current = next;
         return next;
       });
@@ -711,6 +737,8 @@ export default function ChatView({
       request_id: string;
       message: string;
     }) => {
+      // Final sync — only overwrites if message_chunk didn't already populate the content
+      // (handles reconnect / missed-chunk edge cases).
       if (payload.request_id !== pendingRequestIdRef.current) return;
       const aid = pendingAssistantIdRef.current;
       if (!aid) return;
@@ -772,6 +800,7 @@ export default function ChatView({
     socket.on('disconnect', onDisconnect);
     socket.on('project_snapshot', onProjectSnapshot);
     socket.on('thinking_chunk', onThinkingChunk);
+    socket.on('message_chunk', onMessageChunk);
     socket.on('code_chunk', onCodeChunk);
     socket.on('assistant_reply', onAssistantReply);
     socket.on('generation_done', onGenerationDone);
@@ -790,6 +819,7 @@ export default function ChatView({
       socket.off('disconnect', onDisconnect);
       socket.off('project_snapshot', onProjectSnapshot);
       socket.off('thinking_chunk', onThinkingChunk);
+      socket.off('message_chunk', onMessageChunk);
       socket.off('code_chunk', onCodeChunk);
       socket.off('assistant_reply', onAssistantReply);
       socket.off('generation_done', onGenerationDone);
@@ -866,6 +896,7 @@ export default function ChatView({
     if (submitInFlightRef.current) return;
 
     submitInFlightRef.current = true;
+    setIsSubmitting(true);
     try {
       // ── Credit pre-check ────────────────────────────────────────────────────
       // Do this before touching any state so we can bail cleanly.
@@ -985,8 +1016,10 @@ export default function ChatView({
 
       pendingAssistantIdRef.current = pendingId;
       pendingRequestIdRef.current = requestId;
+      firstCodeChunkRef.current = false;
       setStatus('generating');
       setProjectLoadStatus('generating');
+      setViewMode('code');
 
       const socket = getSocket();
       if (!socket.connected) {
@@ -996,8 +1029,8 @@ export default function ChatView({
       codeStickBottomRef.current = true;
 
       flushSync(() => {
-        htmlSourceRef.current = '';
-        setHtmlSource('');
+        // Keep the existing HTML visible until the first code_chunk arrives
+        // so the user still sees the previous result even if generation fails.
         setChatMessages((prev) => [
           ...prev,
           {
@@ -1121,6 +1154,7 @@ export default function ChatView({
       })();
     } finally {
       submitInFlightRef.current = false;
+      setIsSubmitting(false);
     }
   };
 
@@ -1364,6 +1398,7 @@ export default function ChatView({
                       type="button"
                       onClick={() => void handleSubmit()}
                       disabled={
+                        isSubmitting ||
                         !wsConnected ||
                         (!chatInput.trim() && chatAttachments.length === 0)
                       }
@@ -1371,7 +1406,10 @@ export default function ChatView({
                       size="icon"
                       className="rounded-full h-8 w-8 sm:h-10 sm:w-10 bg-black dark:bg-white text-white dark:text-black hover:bg-black/70 dark:hover:bg-white/70"
                     >
-                      <ArrowUp className="h-4 w-4 sm:h-5 sm:w-5" />
+                      {isSubmitting
+                        ? <Loader2 className="h-4 w-4 sm:h-5 sm:w-5 animate-spin" />
+                        : <ArrowUp className="h-4 w-4 sm:h-5 sm:w-5" />
+                      }
                     </Button>
                   )}
                 </div>

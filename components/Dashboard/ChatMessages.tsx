@@ -125,7 +125,7 @@ function AssistantBlock({
             </CollapsibleTrigger>
             <CollapsibleContent>
               <div className="border-t border-border px-3 py-2.5 sm:px-3.5">
-                <p className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground sm:text-[13px]">
+                <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-muted-foreground sm:text-[13px]">
                   {message.thinking}
                 </p>
               </div>
@@ -136,7 +136,7 @@ function AssistantBlock({
 
       {showContent ? (
         <div className="rounded-xl border border-border bg-card px-3 py-2.5 sm:px-4 sm:py-3">
-          <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground sm:text-[15px]">
+          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground sm:text-[15px]">
             {renderInlineContent(message.content)}
           </p>
         </div>
@@ -288,7 +288,7 @@ function UserBubble({ message }: { message: ChatMessage }) {
         {hasAttachments && (
           <AttachmentPreviews attachments={message.attachments!} />
         )}
-        <p className="whitespace-pre-wrap text-sm leading-relaxed text-background sm:text-[15px]">
+        <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-background sm:text-[15px]">
           {message.content}
         </p>
       </div>

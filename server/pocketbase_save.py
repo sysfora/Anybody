@@ -226,6 +226,23 @@ async def patch_project_message_with_client(
     return False
 
 
+def _is_size_validation_error(exc: Exception) -> bool:
+    """Return True when the PocketBase error is a field-size constraint failure."""
+    try:
+        from pocketbase.errors import ClientResponseError
+
+        if isinstance(exc, ClientResponseError):
+            data = getattr(exc, "data", {}) or {}
+            fields = data.get("data", {})
+            return any(
+                (v or {}).get("code") == "validation_max_text_constraint"
+                for v in fields.values()
+            )
+    except Exception:
+        pass
+    return False
+
+
 async def patch_project_record_with_client(
     pb: PocketBase,
     project_id: str,
@@ -243,19 +260,96 @@ async def patch_project_record_with_client(
     if not body:
         return True
 
-    def _patch() -> None:
-        pb.collection(COLLECTION_PROJECTS).update(
-            project_id, body_params=body
-        )
+    def _patch(b: dict) -> None:
+        pb.collection(COLLECTION_PROJECTS).update(project_id, body_params=b)
 
     try:
-        await asyncio.to_thread(_patch)
+        await asyncio.to_thread(_patch, body)
         return True
+    except Exception as exc:
+        # If the html field exceeds the PocketBase field-size limit, retry
+        # saving only the status so the project never stays stuck in
+        # "generating".  Raise the field limit in PocketBase admin to fix
+        # properly (Collections → projects → html → Max length).
+        if _is_size_validation_error(exc) and "html" in body and status is not None:
+            logger.warning(
+                "pocketbase: html too large for projects.html field "
+                "(%d chars) — saving status only for project_id=%s. "
+                "Increase the field's Max length in PocketBase admin.",
+                len(html or ""),
+                project_id,
+            )
+            try:
+                await asyncio.to_thread(_patch, {"status": status})
+                return True
+            except Exception:
+                logger.exception(
+                    "pocketbase: status-only patch also failed project_id=%s",
+                    project_id,
+                )
+        else:
+            logger.exception(
+                "pocketbase: patch project failed project_id=%s", project_id
+            )
+    return False
+
+
+async def fetch_project_html(pb: PocketBase, project_id: str) -> str:
+    """Return the current ``html`` field value for a project, or empty string."""
+    if not project_id:
+        return ""
+
+    def _fetch() -> str:
+        record = pb.collection(COLLECTION_PROJECTS).get_one(project_id)
+        return str(getattr(record, "html", "") or "")
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception:
+        logger.exception("pocketbase: fetch html failed project_id=%s", project_id)
+    return ""
+
+
+async def fetch_project_history(
+    pb: PocketBase,
+    project_id: str,
+    *,
+    max_messages: int = 20,
+) -> list[dict]:
+    """Return the last ``max_messages`` messages for a project as OpenAI-style
+    chat dicts: ``[{"role": "user"|"assistant", "content": "..."}]``.
+
+    Messages with no content are skipped.  Only ``user`` and ``assistant``
+    roles are returned (system messages are handled separately via the prompt
+    file).
+    """
+    if not project_id:
+        return []
+
+    def _fetch() -> list[dict]:
+        records = pb.collection(COLLECTION_MESSAGES).get_full_list(
+            query_params={
+                "filter": f'project = "{project_id}"',
+                "sort": "created",
+                "perPage": max_messages,
+            }
+        )
+        history: list[dict] = []
+        for r in records:
+            role = str(getattr(r, "role", "") or "")
+            content = str(getattr(r, "content", "") or "").strip()
+            if role in ("user", "assistant") and content:
+                history.append({"role": role, "content": content})
+        # Keep only the last max_messages entries
+        return history[-max_messages:]
+
+    try:
+        return await asyncio.to_thread(_fetch)
     except Exception:
         logger.exception(
-            "pocketbase: patch project failed project_id=%s", project_id
+            "pocketbase: fetch history failed project_id=%s", project_id
         )
-    return False
+    return []
 
 
 async def save_project_html(

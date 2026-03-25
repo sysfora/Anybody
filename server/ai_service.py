@@ -1,0 +1,714 @@
+"""AI Service: priority-based model selection with automatic failover.
+
+Loads API keys from the PocketBase ``api_Keys`` collection, selects
+models by ascending priority, and automatically rotates to the next
+available model on token-limit, rate-limit, or similar transient errors.
+
+Supported providers: OpenRouter, OpenAI, Anthropic.
+
+Usage
+-----
+    service = AIService()
+    await service.load_keys(pb)          # call once at startup
+
+    # Streaming (Agent type)
+    async for chunk in service.complete_stream(messages, "Agent", system=PROMPT):
+        if chunk["type"] == "model":
+            print("Using:", chunk["content"])
+        elif chunk["type"] == "thinking":
+            ...  # extended-thinking tokens
+        elif chunk["type"] == "text":
+            ...  # visible output tokens
+
+    # Non-streaming (Optimizer type)
+    result = await service.complete(messages, "Optimizer", system=PROMPT)
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Literal
+
+import httpx
+from pocketbase import PocketBase
+
+logger = logging.getLogger("ai_service")
+
+Provider = Literal["OpenRouter", "OpenAI", "Anthropic"]
+KeyType = Literal["Optimizer", "Agent"]
+
+COLLECTION_API_KEYS = "api_Keys"
+
+# HTTP status codes and body keywords that should trigger model fallback
+_FALLBACK_STATUS_CODES = {429, 503, 529}
+_FALLBACK_ERROR_KEYWORDS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "token limit",
+    "rate limit",
+    "rate_limit_exceeded",
+    "overloaded_error",
+    "overloaded",
+    "too many tokens",
+    "prompt is too long",
+    "exceeds the maximum",
+    "model_not_found",
+    "model not found",
+    "unavailable",
+    "insufficient_quota",
+    "reduce the length",
+)
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class AIFallbackError(Exception):
+    """Signals that this model failed and the next one should be tried."""
+
+
+class AINoKeysError(Exception):
+    """No API keys configured for the requested type."""
+
+
+class AIAllFailedError(Exception):
+    """Every available model has been exhausted."""
+
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ApiKey:
+    id: str
+    api: str
+    provider: Provider
+    model: str
+    type: KeyType
+    priority: float
+
+    @property
+    def endpoint(self) -> str:
+        if self.provider == "OpenRouter":
+            return "https://openrouter.ai/api/v1/chat/completions"
+        if self.provider == "OpenAI":
+            return "https://api.openai.com/v1/chat/completions"
+        if self.provider == "Anthropic":
+            return "https://api.anthropic.com/v1/messages"
+        raise ValueError(f"Unknown provider: {self.provider!r}")
+
+    @property
+    def auth_headers(self) -> dict[str, str]:
+        h: dict[str, str] = {"Content-Type": "application/json"}
+        if self.provider == "Anthropic":
+            h["x-api-key"] = self.api
+            h["anthropic-version"] = "2023-06-01"
+        else:
+            h["Authorization"] = f"Bearer {self.api}"
+            if self.provider == "OpenRouter":
+                h["HTTP-Referer"] = os.environ.get(
+                    "NEXT_PUBLIC_APP_URL", "https://anycoder.sysfora.io"
+                )
+                h["X-Title"] = "AnyCoder"
+        return h
+
+    def build_payload(
+        self,
+        messages: list[dict[str, Any]],
+        system: str | None = None,
+        stream: bool = True,
+        max_tokens: int = 16384,
+    ) -> dict[str, Any]:
+        if self.provider == "Anthropic":
+            # Anthropic: separate system prompt + no system-role messages
+            anthropic_messages = [m for m in messages if m.get("role") != "system"]
+            sys_prompt = system or next(
+                (m["content"] for m in messages if m.get("role") == "system"),
+                None,
+            )
+            payload: dict[str, Any] = {
+                "model": self.model,
+                "messages": anthropic_messages,
+                "max_tokens": max_tokens,
+                "stream": stream,
+            }
+            if sys_prompt:
+                payload["system"] = sys_prompt
+        else:
+            # OpenAI / OpenRouter: system goes as first message
+            oai_messages = [m for m in messages if m.get("role") != "system"]
+            sys_prompt = system or next(
+                (m["content"] for m in messages if m.get("role") == "system"),
+                None,
+            )
+            if sys_prompt:
+                oai_messages = [{"role": "system", "content": sys_prompt}] + oai_messages
+            payload = {
+                "model": self.model,
+                "messages": oai_messages,
+                "stream": stream,
+                "max_tokens": max_tokens,
+            }
+        return payload
+
+
+# ---------------------------------------------------------------------------
+# Stream parser
+# ---------------------------------------------------------------------------
+
+
+class StreamParser:
+    """Parse a full-generation AI response into typed segments.
+
+    State machine
+    -------------
+    message ──(<thinking>)──► thinking ──(</thinking>)──► message
+    message ──(```html)──────► code    ──(```)──────────► message
+    any     ──(&&&DONE&&&)──► done
+
+    Segment types emitted:
+      "thinking"  — content inside <thinking>…</thinking>
+      "message"   — visible chat text (intro before code, closing after code)
+      "code"      — lines inside the ```html fence
+
+    The <thinking> and </thinking> tags, the ```html fence line, the closing
+    ``` line, and &&&DONE&&& are all consumed (not emitted).
+    """
+
+    _CODE_FENCE_RE = re.compile(r"^```\s*html", re.IGNORECASE)
+
+    def __init__(self) -> None:
+        self._state = "message"  # "message" | "thinking" | "code" | "done"
+        self._buf = ""
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        """Feed a text chunk; return list of ``(type, content)`` tuples."""
+        events: list[tuple[str, str]] = []
+        for char in text:
+            self._buf += char
+            if char == "\n":
+                events.extend(self._process_line(self._buf))
+                self._buf = ""
+        return events
+
+    def flush(self) -> list[tuple[str, str]]:
+        """Flush any remaining buffered content that hasn't ended with \\n."""
+        if self._buf:
+            events = self._process_line(self._buf)
+            self._buf = ""
+            return events
+        return []
+
+    def _process_line(self, line: str) -> list[tuple[str, str]]:
+        stripped = line.strip()
+        if self._state == "message":
+            if stripped == "<thinking>":
+                self._state = "thinking"
+                return []
+            if self._CODE_FENCE_RE.match(stripped):
+                self._state = "code"
+                return []
+            if "&&&DONE&&&" in stripped:
+                self._state = "done"
+                # Emit any text that appeared before the marker on the same line.
+                before = line[: line.index("&&&DONE&&&")].rstrip()
+                return [("message", before + "\n")] if before.strip() else []
+            return [("message", line)]
+        elif self._state == "thinking":
+            if stripped == "</thinking>":
+                self._state = "message"
+                return []
+            return [("thinking", line)]
+        elif self._state == "code":
+            if stripped == "```":
+                self._state = "message"
+                return []
+            if "&&&DONE&&&" in stripped:
+                self._state = "done"
+                return []
+            return [("code", line)]
+        return []  # done — emit nothing
+
+
+class ContinuationParser:
+    """Parse an AI continuation response (resuming a cut-off HTML generation).
+
+    The model is asked to output ONLY the remaining HTML from the cutoff
+    point — no ``<thinking>`` preamble, no intro message, no opening fence.
+    This parser handles the common cases where the model adds those anyway.
+
+    State machine
+    -------------
+    code  ──(<thinking>)──► thinking ──(</thinking>)──► code
+    code  ──(```html)──────► code    (fence opener skipped, stay in code)
+    code  ──(```)──────────► done
+    code  ──(&&&DONE&&&)───► done
+
+    Segment types emitted:
+      "thinking"  — model reasoning (routed to thinking_chunk so user sees it)
+      "code"      — raw HTML continuation (appended to existing code_chunks)
+    """
+
+    _CODE_FENCE_RE = re.compile(r"^```\s*html", re.IGNORECASE)
+
+    def __init__(self) -> None:
+        self._state = "code"  # "thinking" | "code" | "done"
+        self._buf = ""
+        self.is_done = False
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        events: list[tuple[str, str]] = []
+        for char in text:
+            self._buf += char
+            if char == "\n":
+                events.extend(self._process_line(self._buf))
+                self._buf = ""
+        return events
+
+    def flush(self) -> list[tuple[str, str]]:
+        if self._buf:
+            events = self._process_line(self._buf)
+            self._buf = ""
+            return events
+        return []
+
+    def _process_line(self, line: str) -> list[tuple[str, str]]:
+        stripped = line.strip()
+        if self._state == "code":
+            if stripped == "<thinking>":
+                self._state = "thinking"
+                return []
+            if self._CODE_FENCE_RE.match(stripped):
+                return []  # skip accidental fence opener
+            if stripped == "```" or "&&&DONE&&&" in stripped:
+                self.is_done = True
+                self._state = "done"
+                return []
+            return [("code", line)]
+        elif self._state == "thinking":
+            if stripped == "</thinking>":
+                self._state = "code"
+                return []
+            return [("thinking", line)]
+        return []  # done
+
+
+class ModifyStreamParser:
+    """Parse a patch-mode AI response into typed segments.
+
+    State machine
+    -------------
+    message ──(<thinking>)────► thinking    ──(</thinking>)──► message
+    message ──(<<<FIND>>>)────► patch_find  ──(<<<REPLACE>>>)─► patch_replace
+    patch_replace ──(<<<END>>>)─────────────────────────────► message
+    any     ──(&&&DONE&&& | &&&CONTINUE&&&)──────────────────► done
+
+    Segment types emitted:
+      "thinking"  — content inside <thinking>…</thinking>
+      "message"   — visible chat text (intro, closing)
+
+    Patch data is NOT emitted as events; it is accumulated in ``.patches``
+    as a list of ``(find_text, replace_text)`` tuples ready to apply.
+    Use ``.wants_continuation`` to check for &&&CONTINUE&&& and
+    ``.is_done`` for &&&DONE&&&.
+    """
+
+    def __init__(self) -> None:
+        self._state = "message"
+        self._buf = ""
+        self._find_acc = ""
+        self._replace_acc = ""
+        self.patches: list[tuple[str, str]] = []
+        self.is_done = False
+        self.wants_continuation = False
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        events: list[tuple[str, str]] = []
+        for char in text:
+            self._buf += char
+            if char == "\n":
+                events.extend(self._process_line(self._buf))
+                self._buf = ""
+        return events
+
+    def flush(self) -> list[tuple[str, str]]:
+        if self._buf:
+            events = self._process_line(self._buf)
+            self._buf = ""
+            return events
+        return []
+
+    def _process_line(self, line: str) -> list[tuple[str, str]]:
+        stripped = line.strip()
+        if self._state == "message":
+            if stripped == "<thinking>":
+                self._state = "thinking"
+                return []
+            if stripped == "<<<FIND>>>":
+                self._state = "patch_find"
+                self._find_acc = ""
+                return []
+            if "&&&DONE&&&" in stripped:
+                self.is_done = True
+                self._state = "done"
+                before = line[: line.index("&&&DONE&&&")].rstrip()
+                return [("message", before + "\n")] if before.strip() else []
+            if "&&&CONTINUE&&&" in stripped:
+                self.wants_continuation = True
+                self._state = "done"
+                before = line[: line.index("&&&CONTINUE&&&")].rstrip()
+                return [("message", before + "\n")] if before.strip() else []
+            return [("message", line)]
+        elif self._state == "thinking":
+            if stripped == "</thinking>":
+                self._state = "message"
+                return []
+            return [("thinking", line)]
+        elif self._state == "patch_find":
+            if stripped == "<<<REPLACE>>>":
+                self._state = "patch_replace"
+                self._replace_acc = ""
+                return []
+            self._find_acc += line
+            return []
+        elif self._state == "patch_replace":
+            if stripped == "<<<END>>>":
+                self.patches.append(
+                    (self._find_acc.strip(), self._replace_acc.strip())
+                )
+                self._find_acc = ""
+                self._replace_acc = ""
+                self._state = "message"
+                return []
+            self._replace_acc += line
+            return []
+        return []  # done
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_fallback_error(status: int, body: str | None) -> bool:
+    if status in _FALLBACK_STATUS_CODES:
+        return True
+    if body:
+        body_lower = body.lower()
+        return any(kw in body_lower for kw in _FALLBACK_ERROR_KEYWORDS)
+    return False
+
+
+_DEFAULT_TIMEOUT = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+
+
+# ---------------------------------------------------------------------------
+# AIService
+# ---------------------------------------------------------------------------
+
+
+class AIService:
+    """Priority-based AI model service with automatic failover.
+
+    Keys are fetched from the PocketBase ``api_Keys`` collection once via
+    ``load_keys()``, then cached in memory.  Call ``load_keys()`` again any
+    time you want to refresh the cache (e.g. after adding/editing keys in the
+    admin panel).
+
+    Model selection
+    ---------------
+    Keys for the requested type are sorted by ``priority`` (ascending — lower
+    number = higher priority).  The service tries them in order and moves to
+    the next one whenever it encounters a fallback-worthy error (token limit,
+    rate limit, overload, etc.).
+    """
+
+    def __init__(self) -> None:
+        self._keys: list[ApiKey] = []
+        self._lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Key management
+    # ------------------------------------------------------------------
+
+    async def load_keys(self, pb: PocketBase) -> None:
+        """Fetch all API keys from PocketBase and cache them sorted by priority."""
+
+        def _fetch() -> list[ApiKey]:
+            records = pb.collection(COLLECTION_API_KEYS).get_full_list(
+                query_params={"sort": "priority,created"}
+            )
+            keys: list[ApiKey] = []
+            for r in records:
+                try:
+                    keys.append(
+                        ApiKey(
+                            id=str(r.id),
+                            api=str(getattr(r, "api", "") or ""),
+                            provider=str(getattr(r, "provider", "") or ""),
+                            model=str(getattr(r, "model", "") or ""),
+                            type=str(getattr(r, "type", "") or ""),
+                            priority=float(getattr(r, "priority", 0) or 0),
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("ai_service: skipping malformed key %s: %s", r.id, exc)
+            return keys
+
+        try:
+            keys = await asyncio.to_thread(_fetch)
+            async with self._lock:
+                self._keys = keys
+            logger.info(
+                "ai_service: loaded %d API key(s) (%d Agent, %d Optimizer)",
+                len(keys),
+                sum(1 for k in keys if k.type == "Agent"),
+                sum(1 for k in keys if k.type == "Optimizer"),
+            )
+        except Exception:
+            logger.exception("ai_service: failed to load API keys from PocketBase")
+
+    def get_keys(self, type: KeyType) -> list[ApiKey]:
+        """Return valid keys of the given type sorted by priority (ascending)."""
+        return sorted(
+            [k for k in self._keys if k.type == type and k.api.strip() and k.model.strip()],
+            key=lambda k: k.priority,
+        )
+
+    # ------------------------------------------------------------------
+    # Streaming completion
+    # ------------------------------------------------------------------
+
+    async def complete_stream(
+        self,
+        messages: list[dict[str, Any]],
+        type: KeyType = "Agent",
+        *,
+        system: str | None = None,
+        max_tokens: int = 16384,
+    ) -> AsyncIterator[dict[str, str]]:
+        """Stream AI completion with automatic model fallback.
+
+        Yields dicts:
+          ``{"type": "model",    "content": "<model> (<provider>)"}``  — once, on first token
+          ``{"type": "thinking", "content": "..."}``                   — reasoning tokens
+          ``{"type": "text",     "content": "..."}``                   — visible output tokens
+        """
+        keys = self.get_keys(type)
+        if not keys:
+            raise AINoKeysError(f"No API keys configured for type '{type}'")
+
+        last_error: Exception | None = None
+        for key in keys:
+            try:
+                async for chunk in self._stream_key(key, messages, system, max_tokens):
+                    yield chunk
+                return  # success — stop iterating models
+            except AIFallbackError as exc:
+                logger.warning(
+                    "ai_service: %s (%s) failed → trying next model. Reason: %s",
+                    key.model,
+                    key.provider,
+                    exc,
+                )
+                last_error = exc
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "ai_service: unexpected error with %s (%s)", key.model, key.provider
+                )
+                last_error = exc
+
+        raise AIAllFailedError(
+            f"All {len(keys)} model(s) for type '{type}' exhausted. Last error: {last_error}"
+        )
+
+    async def _stream_key(
+        self,
+        key: ApiKey,
+        messages: list[dict[str, Any]],
+        system: str | None,
+        max_tokens: int,
+    ) -> AsyncIterator[dict[str, str]]:
+        payload = key.build_payload(messages, system=system, stream=True, max_tokens=max_tokens)
+        yielded_model_event = False
+
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+            async with client.stream(
+                "POST", key.endpoint, headers=key.auth_headers, json=payload
+            ) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    body_str = body.decode(errors="ignore")
+                    if _is_fallback_error(resp.status_code, body_str):
+                        raise AIFallbackError(f"HTTP {resp.status_code}: {body_str[:300]}")
+                    raise RuntimeError(f"HTTP {resp.status_code}: {body_str[:300]}")
+
+                if not yielded_model_event:
+                    yield {"type": "model", "content": f"{key.model} ({key.provider})"}
+                    yielded_model_event = True
+
+                if key.provider == "Anthropic":
+                    async for chunk in self._parse_anthropic_stream(resp):
+                        yield chunk
+                else:
+                    async for chunk in self._parse_openai_stream(resp):
+                        yield chunk
+
+    async def _parse_openai_stream(
+        self, resp: httpx.Response
+    ) -> AsyncIterator[dict[str, str]]:
+        async for line in resp.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            if "error" in obj:
+                err_str = json.dumps(obj["error"])
+                if _is_fallback_error(0, err_str):
+                    raise AIFallbackError(err_str[:300])
+                raise RuntimeError(err_str[:300])
+
+            for choice in obj.get("choices") or []:
+                delta = choice.get("delta") or {}
+                # o1/o3-style reasoning field
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                if reasoning:
+                    yield {"type": "thinking", "content": reasoning}
+                content = delta.get("content")
+                if content:
+                    yield {"type": "text", "content": content}
+
+    async def _parse_anthropic_stream(
+        self, resp: httpx.Response
+    ) -> AsyncIterator[dict[str, str]]:
+        async for line in resp.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            if obj.get("type") == "error":
+                err = obj.get("error") or obj
+                err_str = json.dumps(err)
+                if _is_fallback_error(0, err_str):
+                    raise AIFallbackError(err_str[:300])
+                raise RuntimeError(err_str[:300])
+
+            if obj.get("type") == "content_block_delta":
+                delta = obj.get("delta") or {}
+                dtype = delta.get("type")
+                if dtype == "thinking_delta":
+                    text = delta.get("thinking", "")
+                    if text:
+                        yield {"type": "thinking", "content": text}
+                elif dtype == "text_delta":
+                    text = delta.get("text", "")
+                    if text:
+                        yield {"type": "text", "content": text}
+
+    # ------------------------------------------------------------------
+    # Non-streaming completion (Optimizer)
+    # ------------------------------------------------------------------
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        type: KeyType = "Optimizer",
+        *,
+        system: str | None = None,
+        max_tokens: int = 2048,
+    ) -> str:
+        """Non-streaming completion with automatic model fallback.
+
+        Returns the full response text as a string.
+        """
+        keys = self.get_keys(type)
+        if not keys:
+            raise AINoKeysError(f"No API keys configured for type '{type}'")
+
+        last_error: Exception | None = None
+        for key in keys:
+            try:
+                return await self._complete_key(key, messages, system, max_tokens)
+            except AIFallbackError as exc:
+                logger.warning(
+                    "ai_service: %s (%s) failed → trying next model. Reason: %s",
+                    key.model,
+                    key.provider,
+                    exc,
+                )
+                last_error = exc
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "ai_service: unexpected error with %s (%s)", key.model, key.provider
+                )
+                last_error = exc
+
+        raise AIAllFailedError(
+            f"All {len(keys)} model(s) for type '{type}' exhausted. Last error: {last_error}"
+        )
+
+    async def _complete_key(
+        self,
+        key: ApiKey,
+        messages: list[dict[str, Any]],
+        system: str | None,
+        max_tokens: int,
+    ) -> str:
+        payload = key.build_payload(
+            messages, system=system, stream=False, max_tokens=max_tokens
+        )
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+            resp = await client.post(key.endpoint, headers=key.auth_headers, json=payload)
+            body_str = resp.text
+
+            if resp.status_code != 200:
+                if _is_fallback_error(resp.status_code, body_str):
+                    raise AIFallbackError(f"HTTP {resp.status_code}: {body_str[:300]}")
+                raise RuntimeError(f"HTTP {resp.status_code}: {body_str[:300]}")
+
+            try:
+                obj = resp.json()
+            except Exception:
+                raise RuntimeError(f"Invalid JSON: {body_str[:300]}")
+
+            if "error" in obj:
+                err_str = json.dumps(obj["error"])
+                if _is_fallback_error(0, err_str):
+                    raise AIFallbackError(err_str[:300])
+                raise RuntimeError(err_str[:300])
+
+            if key.provider == "Anthropic":
+                content = obj.get("content") or []
+                return "".join(
+                    block.get("text", "")
+                    for block in content
+                    if block.get("type") == "text"
+                )
+            else:
+                choices = obj.get("choices") or []
+                if not choices:
+                    raise RuntimeError(f"No choices in response: {body_str[:300]}")
+                return choices[0].get("message", {}).get("content") or ""
