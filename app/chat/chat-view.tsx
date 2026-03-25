@@ -1050,6 +1050,7 @@ export default function ChatView({
         ]);
       });
       setChatInput('');
+      if (textareaRef.current) textareaRef.current.style.height = 'auto';
       setChatAttachments([]);
       // Reset file input so the same file can be re-selected
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -1389,7 +1390,7 @@ export default function ChatView({
                     />
                   </div>
                 )}
-                <div className="flex-1 mb-3 min-h-0">
+                <div className="mb-3">
                   <Textarea
                     ref={textareaRef}
                     value={chatInput}
@@ -1405,7 +1406,7 @@ export default function ChatView({
                         ? 'Describe changes...'
                         : 'What do you want to build?'
                     }
-                    className="w-full h-full bg-transparent border-0 text-sm sm:text-base text-black dark:text-white placeholder:text-muted-foreground focus-visible:ring-0 focus-visible:ring-offset-0 resize-none"
+                    className="w-full min-h-[40px] max-h-[150px] bg-transparent border-0 text-sm sm:text-base text-black dark:text-white placeholder:text-muted-foreground focus-visible:ring-0 focus-visible:ring-offset-0 resize-none overflow-y-auto"
                     disabled={busy || !wsConnected}
                   />
                 </div>
