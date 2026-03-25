@@ -612,16 +612,32 @@ async def _run_ai_generation(
             )
 
     # ── Common setup ───────────────────────────────────────────────────────
-    is_modification = bool(existing_html and existing_html.strip())
-    # Optimizer only runs on short new prompts, not on modifications
-    prompt = user_text if is_modification else await _maybe_optimize_prompt(service, user_text)
-
     # Conversation history (strip last user turn — we supply it ourselves)
     history: list[dict] = []
+    raw_history: list[dict] = []
     if project_id and pb:
-        history = await fetch_project_history(pb, project_id, max_messages=20)
+        raw_history = await fetch_project_history(pb, project_id, max_messages=20)
+        history = list(raw_history)
         if history and history[-1].get("role") == "user":
             history = history[:-1]
+        # Remove leading assistant turns (e.g. the "Project remixed" marker
+        # added by the remix API).  All providers require conversations to
+        # start with a user message; a leading assistant turn causes errors or
+        # makes the model ignore the HTML context and generate from scratch.
+        while history and history[0].get("role") == "assistant":
+            history = history[1:]
+
+    # A project is a modification if it already has HTML, OR if it was remixed
+    # (detected by the "Project remixed" assistant marker as the only history
+    # entry, meaning no real user exchange has happened yet).
+    _is_remixed = (
+        len(raw_history) == 1
+        and raw_history[0].get("role") == "assistant"
+        and raw_history[0].get("content", "").strip().lower() == "project remixed"
+    )
+    is_modification = bool(existing_html and existing_html.strip()) or _is_remixed
+    # Optimizer only runs on short new prompts, not on modifications
+    prompt = user_text if is_modification else await _maybe_optimize_prompt(service, user_text)
 
     # ── Branch A: full generation ──────────────────────────────────────────
     if not is_modification:
