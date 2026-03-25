@@ -160,6 +160,75 @@ _preview_worker_task: asyncio.Task | None = None
 PREVIEW_WORKER_MAX_ATTEMPTS: int = int(os.environ.get("PREVIEW_WORKER_MAX_ATTEMPTS", "3"))
 PREVIEW_WORKER_IDLE_SLEEP_S: float = float(os.environ.get("PREVIEW_WORKER_IDLE_SLEEP_S", "2.0"))
 PREVIEW_WORKER_WAIT_FOR_PAINT_S: float = float(os.environ.get("PREVIEW_WORKER_WAIT_FOR_PAINT_S", "3.0"))
+PREVIEW_WORKER_SCAN_INTERVAL_S: float = float(os.environ.get("PREVIEW_WORKER_SCAN_INTERVAL_S", "600"))
+PREVIEW_WORKER_MIN_AGE_S: float = float(os.environ.get("PREVIEW_WORKER_MIN_AGE_S", "3600"))
+
+
+def _iso_utc(dt: float) -> str:
+    import datetime
+
+    d = datetime.datetime.fromtimestamp(dt, tz=datetime.timezone.utc)
+    # PocketBase accepts RFC3339-like strings
+    return d.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+async def _maybe_scan_projects_without_preview() -> None:
+    """
+    Enqueue projects that:
+    - are completed
+    - are older than PREVIEW_WORKER_MIN_AGE_S
+    - have no `preview` stored yet
+    """
+    cutoff_ts = time.time() - PREVIEW_WORKER_MIN_AGE_S
+
+    async with pocketbase_admin() as pb:
+        # Best-effort: query by status+age, then filter locally for missing preview
+        # to avoid depending on PocketBase filter semantics for null.
+        projects = await asyncio.to_thread(
+            lambda: pb.collection("projects").get_full_list(
+                query_params={
+                    "filter": 'status="completed"',
+                    "sort": "-created",
+                    "perPage": 200,
+                }
+            )
+        )
+
+        for project in projects:
+            project_id = str(getattr(project, "id", "") or "")
+            if not project_id:
+                continue
+            preview_val = getattr(project, "preview", None)
+            if isinstance(preview_val, str) and preview_val.strip():
+                continue
+            # Age check: created may be `created` or `dateCreated` depending on schema.
+            created_raw = getattr(project, "created", None) or getattr(
+                project, "dateCreated", None
+            )
+            created_ts: float | None = None
+            if isinstance(created_raw, str) and created_raw.strip():
+                try:
+                    import datetime
+
+                    # PocketBase usually returns RFC3339 (e.g. 2026-03-25T12:34:56.789Z)
+                    dt = datetime.datetime.fromisoformat(
+                        created_raw.replace("Z", "+00:00")
+                    )
+                    created_ts = dt.timestamp()
+                except Exception:
+                    created_ts = None
+
+            # If we can't determine age, skip (safer than generating immediately).
+            if created_ts is None:
+                continue
+            if created_ts > cutoff_ts:
+                continue
+
+            # Only enqueue if HTML exists; the worker will re-check status=generating.
+            html_val = getattr(project, "html", "") or ""
+            if not str(html_val).strip():
+                continue
+            await _enqueue_preview(project_id)
 
 
 def _ensure_preview_worker_running() -> None:
@@ -248,8 +317,12 @@ async def _upload_preview_to_next(project_id: str, jpeg_bytes: bytes) -> None:
 
 async def _preview_worker_loop() -> None:
     logger.info("ws_app: preview worker started")
+    next_scan_at = time.time() + PREVIEW_WORKER_SCAN_INTERVAL_S
     while True:
         try:
+            if time.time() >= next_scan_at:
+                await _maybe_scan_projects_without_preview()
+                next_scan_at = time.time() + PREVIEW_WORKER_SCAN_INTERVAL_S
             await _preview_worker_tick()
         except asyncio.CancelledError:
             return
@@ -292,13 +365,37 @@ async def _preview_worker_tick() -> None:
                 logger.warning("ws_app: preview worker: empty html project_id=%s", project_id)
                 continue
 
+            # If HTML was updated *after* we enqueued this job, it's safe to render.
+            # This avoids rendering a stale preview during the small window where
+            # `status` might still be `completed` but the generation hasn't patched
+            # `html` yet.
+            updated_raw = getattr(project, "updated", None) or getattr(
+                project, "dateUpdated", None
+            )
+            updated_ts: float | None = None
+            if isinstance(updated_raw, str) and updated_raw.strip():
+                try:
+                    import datetime
+
+                    dt = datetime.datetime.fromisoformat(
+                        updated_raw.replace("Z", "+00:00")
+                    )
+                    updated_ts = dt.timestamp()
+                except Exception:
+                    updated_ts = None
+
             async with _preview_jobs_lock:
                 job = _preview_jobs.get(project_id)
                 if not job or job.get("state") not in ("queued", "generating"):
                     continue
+                chosen_expected_queued_at = float(job.get("queued_at", 0))
+
+                if updated_ts is not None and updated_ts < chosen_expected_queued_at:
+                    # Project hasn't been patched since we enqueued the job.
+                    # Leave the job queued for the next tick.
+                    continue
                 chosen_project_id = project_id
                 chosen_html = html
-                chosen_expected_queued_at = float(job.get("queued_at", 0))
                 job["state"] = "generating"
             break
 
@@ -372,6 +469,7 @@ async def connect(sid, _environ, auth):
         logger.warning("Unauthorized connection attempt rejected: %s", sid)
         raise ConnectionRefusedError("Unauthorized")
     logger.info("client connected %s", sid)
+    _ensure_preview_worker_running()
 
 
 @sio.event
@@ -690,7 +788,9 @@ async def _maybe_optimize_prompt(service: AIService, user_text: str) -> str:
 # Patch utilities
 # ---------------------------------------------------------------------------
 
-MAX_PATCH_ITERATIONS = 5
+# How many Modify-prompt patch iterations to allow in "patch mode".
+# Overridable via env var so deployments can tune cost/quality.
+MAX_PATCH_ITERATIONS = max(1, int(os.environ.get("MAX_PATCH_ITERATIONS", "5")))
 
 # Matches <<<FIND>>>…<<<REPLACE>>>…<<<END>>> blocks (greedy-safe with DOTALL)
 _PATCH_RE = re.compile(

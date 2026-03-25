@@ -3,17 +3,71 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
+# Playwright downloads Chromium into this path.
+# We set it so the browser binaries can be copied into the runtime image.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 # Install dependencies into a separate prefix so they are easy to copy.
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Download browser binaries during build.
+RUN python -m playwright install chromium
 
 # ── runtime stage ─────────────────────────────────────────────────────────────
 FROM python:3.12-slim
 
 WORKDIR /app
 
+# Playwright downloads Chromium into this path.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# Chromium runtime deps (Debian/Ubuntu slim).
+# Kept as a single layer for smaller rebuilds.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    fonts-liberation \
+    fonts-freefont-ttf \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libc6 \
+    libcairo2 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libexpat1 \
+    libfontconfig1 \
+    libgbm1 \
+    libglib2.0-0 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    libxshmfence1 \
+    libxrender1 \
+    libxshmfence1 \
+    libxrender1 \
+    libu2f-udev \
+    libvulkan1 \
+    wget \
+  && rm -rf /var/lib/apt/lists/*
+
 # Copy installed packages from the builder stage.
 COPY --from=builder /install /usr/local
+
+# Copy Playwright browser binaries from the builder stage.
+COPY --from=builder /ms-playwright /ms-playwright
 
 # Copy application source.
 COPY ws_app.py pocketbase_save.py ai_service.py ./
