@@ -26,6 +26,7 @@ One sentence closing message — a usage tip, notable feature, or invitation to 
 - Custom CSS only in a `<style>` block if needed; prefer Tailwind utilities.
 - Mobile-first layout with responsive breakpoints (`sm:`, `md:`, `lg:`).
 - Light and dark themes: toggle with JS, persist in `localStorage` key `theme`, apply `class="dark"` on `<html>`.
+- Always use real svg icons, not emoji icons.
 - Flat design: no `box-shadow` or drop shadows.
 - Neutral/brand palette; no gradients unless requested.
 - All behavior inline or in a `<script>` tag — no external JS frameworks.

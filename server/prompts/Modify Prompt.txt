@@ -30,5 +30,6 @@ One sentence closing message confirming the change or inviting further requests.
 - Multiple patch blocks per response are allowed and encouraged.
 - Do NOT emit a full HTML file — patches only.
 - Keep intro and closing to one sentence each — plain text, no markdown.
+- Always use real svg icons, not emoji icons.
 - End with `&&&DONE&&&` when all changes are complete.
 - End with `&&&CONTINUE&&&` instead when you still have more changes to make (only when changes genuinely cannot fit in one response).
