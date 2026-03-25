@@ -1256,7 +1256,7 @@ export default function ChatView({
                 {!wsConnected ? (
                   <span
                     className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-destructive/15 text-destructive"
-                    title="Start: npm run dev:ws (port 5000)"
+                    title="Check your internet connection. Refresh the page if you think it's an issue."
                   >
                     Offline
                   </span>

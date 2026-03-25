@@ -16,7 +16,7 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 
 # Copy application source.
-COPY ws_app.py pocketbase_save.py ./
+COPY ws_app.py pocketbase_save.py ai_service.py ./
 COPY prompts/ ./prompts/
 
 # The server reads environment variables at runtime.
