@@ -351,6 +351,7 @@ export async function GET(
 
       // Return iframe wrapper for absolute isolation
       const rawUrl = `${request.nextUrl.pathname}${request.nextUrl.search ? request.nextUrl.search + '&' : '?'}raw=true`;
+      const appOrigin = `${request.nextUrl.protocol}//${request.nextUrl.host}`;
       const wrapperHtml = `<!DOCTYPE html>
 <html>
 <head>
@@ -360,10 +361,52 @@ export async function GET(
   <style>
     body, html { margin: 0; padding: 0; height: 100vh; width: 100vw; overflow: hidden; background-color: white; color-scheme: light; }
     iframe { border: none; width: 100%; height: 100%; display: block; background-color: white; }
+    .ab-badge {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 12px 7px 8px;
+      background: rgba(10,10,10,0.82);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 999px;
+      text-decoration: none;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      font-size: 12.5px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.28), 0 1px 4px rgba(0,0,0,0.18);
+      transition: background 0.18s, transform 0.15s, box-shadow 0.18s;
+      user-select: none;
+    }
+    .ab-badge:hover {
+      background: rgba(24,24,24,0.96);
+      transform: translateY(-1px) scale(1.03);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.36), 0 2px 8px rgba(0,0,0,0.20);
+    }
+    .ab-badge:active { transform: scale(0.98); }
+    .ab-badge img {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      display: block;
+      flex-shrink: 0;
+    }
+    .ab-badge span { white-space: nowrap; }
   </style>
 </head>
 <body>
   <iframe src="${rawUrl}" title="${projectName} preview"></iframe>
+  <a class="ab-badge" href="${appOrigin}" target="_blank" rel="noopener noreferrer" title="Built with Anybody.dev">
+    <img src="${appOrigin}/Favicon.png" alt="Anybody.dev logo" />
+    <span>Anybody.dev</span>
+  </a>
 </body>
 </html>`;
 

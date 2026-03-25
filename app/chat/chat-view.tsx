@@ -1549,7 +1549,7 @@ export default function ChatView({
                     className="w-full h-full border-0"
                     title="Preview"
                     style={{ backgroundColor: 'white', colorScheme: 'light' }}
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                    sandbox="allow-scripts allow-forms allow-popups"
                   />
                 </div>
               ) : (
