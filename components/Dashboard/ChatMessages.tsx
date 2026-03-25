@@ -189,11 +189,20 @@ export function AttachmentIcon({ mimeType }: { mimeType: string }) {
 export function AttachmentPreviews({
   attachments,
   onRemove,
+  variant = 'bubble',
 }: {
   attachments: AttachmentMeta[];
   onRemove?: (attachment: AttachmentMeta) => void;
+  /**
+   * "bubble" – used inside the dark user-message bubble (bg-foreground).
+   * "input"  – used inside the light input box.
+   */
+  variant?: 'bubble' | 'input';
 }) {
   if (!attachments.length) return null;
+
+  const isInput = variant === 'input';
+
   return (
     <div className="flex flex-wrap gap-2.5 mb-3">
       {attachments.map((a) => {
@@ -205,7 +214,10 @@ export function AttachmentPreviews({
               target="_blank"
               rel="noopener noreferrer"
               className={cn(
-                'group relative flex items-center gap-2 overflow-hidden rounded-xl border border-background/20 bg-background/5 transition-all hover:bg-background/10 active:scale-[0.98] shadow-sm',
+                'group relative flex items-center gap-2 overflow-hidden rounded-xl border transition-all active:scale-[0.98]',
+                isInput
+                  ? 'border-border bg-muted hover:bg-muted/70'
+                  : 'border-background/20 bg-background/5 hover:bg-background/10',
                 isImage
                   ? 'h-24 w-24 p-0 shrink-0'
                   : 'h-11 px-3 py-2 max-w-[200px]',
@@ -221,15 +233,28 @@ export function AttachmentPreviews({
                 />
               ) : (
                 <>
-                  <div className="text-background/90 group-hover:text-background transition-colors">
+                  <div className={cn(
+                    'transition-colors',
+                    isInput
+                      ? 'text-muted-foreground group-hover:text-foreground'
+                      : 'text-background/90 group-hover:text-background',
+                  )}>
                     <AttachmentIcon mimeType={a.mimeType} />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-[11px] font-medium leading-none text-background/90 group-hover:text-background mb-0.5 transition-colors">
+                    <p className={cn(
+                      'truncate text-[11px] font-medium leading-none mb-0.5 transition-colors',
+                      isInput
+                        ? 'text-foreground/90 group-hover:text-foreground'
+                        : 'text-background/90 group-hover:text-background',
+                    )}>
                       {a.name}
                     </p>
-                    <p className="text-[9px] text-background/40 uppercase font-bold tracking-tight">
-                      {a.mimeType.split('/')[1] || 'FILE'}
+                    <p className={cn(
+                      'text-[9px] uppercase font-bold tracking-tight',
+                      isInput ? 'text-muted-foreground' : 'text-background/40',
+                    )}>
+                      {a.mimeType.split('/')[1]?.toUpperCase() || 'FILE'}
                     </p>
                   </div>
                 </>

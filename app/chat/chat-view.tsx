@@ -28,6 +28,7 @@ import {
   type ChatMessage,
   type AttachmentMeta,
 } from '@/components/Dashboard/ChatMessages';
+
 import { CodeHighlight } from '@/components/Dashboard/CodeHighlight';
 import { useProject, type ProjectStatus } from '@/context/ProjectContext';
 import { Button } from '@/components/ui/button';
@@ -115,8 +116,7 @@ export default function ChatView({
   projectIdFromUrl?: string;
 }) {
   const router = useRouter();
-  const [prompt, setPrompt] = useState('');
-  const [visibility, setVisibility] = useState<VisibilityOption>('public');
+  // Input state is now managed globally via ProjectContext
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [htmlSource, setHtmlSource] = useState('');
   const [iframeKey, setIframeKey] = useState(0);
@@ -138,41 +138,20 @@ export default function ChatView({
   const pendingAssistantIdRef = useRef<string | null>(null);
   const pendingRequestIdRef = useRef<string | null>(null);
 
-  // File attachments state
-  const [attachments, setAttachments] = useState<File[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const generationWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const htmlSourceRef = useRef('');
   const projectNameRef = useRef<string | null>(null);
   const projectPbIdRef = useRef<string | null>(null);
-  // Holds a message typed on the home page that should be auto-submitted once
-  // the socket connects on the /chat page.
-  const autoSubmitMessageRef = useRef<string | null>(null);
-  const autoSubmitVisibilityRef = useRef<VisibilityOption>('public');
   const projectIdFromUrlRef = useRef<string | undefined>(projectIdFromUrl);
   const routerRef = useRef(router);
   const wsConnectedRef = useRef(false);
   const sessionAuthedRef = useRef(false);
+  const htmlSourceRef = useRef('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const generationWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [projectLoadStatus, setProjectLoadStatus] = useState<string | null>(
     null,
   );
   const [attachmentMetas, setAttachmentMetas] = useState<AttachmentMeta[]>([]);
-
-  useEffect(() => {
-    const metas = attachments.map((f) => ({
-      name: f.name,
-      url: URL.createObjectURL(f),
-      mimeType: f.type,
-      size: f.size,
-    }));
-    setAttachmentMetas(metas);
-    return () => {
-      metas.forEach((m) => URL.revokeObjectURL(m.url));
-    };
-  }, [attachments]);
 
   const {
     projectName,
@@ -186,9 +165,28 @@ export default function ChatView({
     deviceSize,
     previewUrl,
     setRefreshCallback,
-    pendingSubmission,
-    clearPendingSubmission,
+    chatInput,
+    setChatInput,
+    chatAttachments,
+    setChatAttachments,
+    chatVisibility,
+    setChatVisibility,
+    shouldAutoSubmit,
+    setShouldAutoSubmit,
   } = useProject();
+
+  useEffect(() => {
+    const metas = chatAttachments.map((f) => ({
+      name: f.name,
+      url: URL.createObjectURL(f),
+      mimeType: f.type,
+      size: f.size,
+    }));
+    setAttachmentMetas(metas);
+    return () => {
+      metas.forEach((m) => URL.revokeObjectURL(m.url));
+    };
+  }, [chatAttachments]);
 
   useEffect(() => {
     routerRef.current = router;
@@ -221,7 +219,7 @@ export default function ChatView({
           
           // If subscribed and starting a new project (no projectIdFromUrl), default to private
           if (sub && !projectIdFromUrl) {
-            setVisibility('private');
+            setChatVisibility('private');
           }
         }
       } catch (err) {
@@ -362,56 +360,47 @@ export default function ChatView({
     const slug = projectIdFromUrl?.trim();
     if (!slug) return;
     const saved = loadPrompt(slug);
-    if (saved) setPrompt(saved);
+    if (saved) setChatInput(saved);
     // Only run when the slug first becomes available.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectIdFromUrl]);
 
-  // On mount, capture any pending message to auto-submit once the socket connects.
-  // Sources (checked in priority order):
-  //   1. localStorage subscription resume — user returned after subscribing
-  //   2. pendingSubmission context    — user navigated from the home page
-  // Only applies to a fresh /chat (no existing project in the URL).
+  // On mount, check if there's a subscription resume to auto-submit.
   useEffect(() => {
     if (projectIdFromUrl?.trim()) return;
 
-    // 1. Subscription resume: user went through Stripe and came back to /chat
     try {
       const raw = localStorage.getItem(SUBSCRIPTION_RESUME_KEY);
       if (raw) {
         const data = JSON.parse(raw) as SubscriptionResumeData;
         if (data.returnTo === '/chat' && data.pendingPrompt?.trim()) {
-          autoSubmitMessageRef.current = data.pendingPrompt.trim();
-          autoSubmitVisibilityRef.current =
-            (data.pendingVisibility as VisibilityOption) ?? 'public';
+          setChatInput(data.pendingPrompt.trim());
+          setChatVisibility((data.pendingVisibility as VisibilityOption) ?? 'public');
+          setShouldAutoSubmit(true);
           localStorage.removeItem(SUBSCRIPTION_RESUME_KEY);
-          return;
         }
       }
     } catch {
       // ignore
     }
-
-    // 2. Normal home → chat navigation via context
-    const msg = pendingSubmission.message?.trim();
-    if (!msg) return;
-    autoSubmitMessageRef.current = msg;
-    autoSubmitVisibilityRef.current =
-      (pendingSubmission.visibility as VisibilityOption) ?? 'public';
-    clearPendingSubmission();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally runs once on mount
 
-  // When the socket connects, fire the pending auto-submit from the home page.
+  // When the socket connects, check if we need to auto-submit (either from Home.tsx navigate or subscription resume)
   useEffect(() => {
     if (!wsConnected) return;
-    const msg = autoSubmitMessageRef.current;
-    if (!msg) return;
-    autoSubmitMessageRef.current = null;
-    setVisibility(autoSubmitVisibilityRef.current);
-    void handleSubmit(msg);
+    if (!shouldAutoSubmit) return;
+    
+    // Once handled, turn off auto-submission to prevent loops
+    setShouldAutoSubmit(false);
+    
+    if (!chatInput.trim() && chatAttachments.length === 0) return;
+    
+    // We snapshot attachments to clear the main state visually exactly how handleSubmit does it
+    const filesToSubmit = [...chatAttachments];
+    void handleSubmit(chatInput, filesToSubmit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsConnected]); // handleSubmit intentionally omitted — uses wsConnectedRef internally
+  }, [wsConnected, shouldAutoSubmit]); 
 
   const loadedProjectKeyRef = useRef<string | null>(null);
 
@@ -467,7 +456,7 @@ export default function ChatView({
           data.project?.visibility === 'public' ||
           data.project?.visibility === 'private'
         ) {
-          setVisibility(data.project.visibility as VisibilityOption);
+          setChatVisibility(data.project.visibility as VisibilityOption);
         }
         let st = data.project?.status ?? 'completed';
         const lastAssistant = [...rows]
@@ -489,7 +478,7 @@ export default function ChatView({
         }
       }
     },
-    [clearGenerationWatchdog, setStatus, setVisibility, capturePreview],
+    [clearGenerationWatchdog, setStatus, setChatVisibility, capturePreview],
   );
 
   useEffect(() => {
@@ -852,7 +841,7 @@ export default function ChatView({
     // Clear saved prompt and last-slug so returning to /chat starts fresh.
     clearPrompt(projectIdFromUrlRef.current?.trim());
     clearLastChatSlug();
-    setPrompt('');
+    setChatInput('');
     htmlSourceRef.current = '';
     setHtmlSource('');
     setChatMessages([]);
@@ -865,9 +854,9 @@ export default function ChatView({
     ctxProjectStatus === 'generating' ||
     projectLoadStatus === 'generating';
 
-  const handleSubmit = async (textOverride?: string) => {
-    const text = (textOverride !== undefined ? textOverride : prompt).trim();
-    if (!text) return;
+  const handleSubmit = async (textOverride?: string, filesOverride?: File[]) => {
+    const text = (textOverride !== undefined ? textOverride : chatInput).trim();
+    // Removed strict !text block here since we might only be sending attachments
     // Use the ref so this works when called directly from the connect handler
     // before the wsConnected state update has been committed.
     if (!wsConnectedRef.current) return;
@@ -946,7 +935,7 @@ export default function ChatView({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               name: resolvedProjectName,
-              visibility,
+              visibility: chatVisibility,
             }),
           });
           if (res.ok) {
@@ -972,7 +961,7 @@ export default function ChatView({
       }
 
       // Snapshot attachments before clearing state
-      const pendingFiles = [...attachments];
+      const pendingFiles = filesOverride || [...chatAttachments];
 
       // Build optimistic local previews (blob URLs) so attachments show immediately
       type LocalAttachment = AttachmentMeta & { objectUrl?: string };
@@ -1025,8 +1014,8 @@ export default function ChatView({
           },
         ]);
       });
-      setPrompt('');
-      setAttachments([]);
+      setChatInput('');
+      setChatAttachments([]);
       // Reset file input so the same file can be re-selected
       if (fileInputRef.current) fileInputRef.current.value = '';
       clearPrompt(projectIdFromUrlRef.current?.trim());
@@ -1136,7 +1125,7 @@ export default function ChatView({
 
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
-    setPrompt(value);
+    setChatInput(value);
     savePrompt(projectIdFromUrl?.trim(), value);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
@@ -1159,7 +1148,7 @@ export default function ChatView({
     }
     const valid = selected.filter((f) => f.size <= MAX_ATTACHMENT_BYTES);
 
-    setAttachments((prev) => {
+    setChatAttachments((prev) => {
       const combined = [...prev, ...valid];
       if (combined.length > MAX_ATTACHMENT_FILES) {
         toast.error(`You can attach up to ${MAX_ATTACHMENT_FILES} files. Extra files were removed.`);
@@ -1172,7 +1161,7 @@ export default function ChatView({
   };
 
   const removeAttachment = (attachment: AttachmentMeta) => {
-    setAttachments((prev) =>
+    setChatAttachments((prev) =>
       prev.filter((f) => f.name !== attachment.name || f.size !== attachment.size),
     );
   };
@@ -1196,7 +1185,7 @@ export default function ChatView({
         return;
       }
     }
-    setVisibility(newVisibility);
+    setChatVisibility(newVisibility);
   };
 
   const hasProject = !!projectName?.trim();
@@ -1300,23 +1289,24 @@ export default function ChatView({
               multiple
               className="hidden"
               onChange={handleFileSelect}
-              disabled={busy || !wsConnected || attachments.length >= MAX_ATTACHMENT_FILES}
+              disabled={busy || !wsConnected || chatAttachments.length >= MAX_ATTACHMENT_FILES}
             />
             <div className="relative group">
               <div className="bg-white dark:bg-black border-2 border-border rounded-2xl p-3 sm:p-4 transition-all duration-300 flex flex-col">
                 {/* Attachment preview strip */}
-                {attachments.length > 0 && (
+                {chatAttachments.length > 0 && (
                   <div className="px-1 pt-1">
                     <AttachmentPreviews
                       attachments={attachmentMetas}
                       onRemove={removeAttachment}
+                      variant="input"
                     />
                   </div>
                 )}
                 <div className="flex-1 mb-3 min-h-0">
                   <Textarea
                     ref={textareaRef}
-                    value={prompt}
+                    value={chatInput}
                     onChange={handleTextareaChange}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
@@ -1339,14 +1329,14 @@ export default function ChatView({
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
-                      disabled={busy || !wsConnected || attachments.length >= MAX_ATTACHMENT_FILES}
-                      title={attachments.length >= MAX_ATTACHMENT_FILES ? 'Maximum 5 attachments reached' : 'Attach files (max 5, 5 MB each)'}
+                      disabled={busy || !wsConnected || chatAttachments.length >= MAX_ATTACHMENT_FILES}
+                      title={chatAttachments.length >= MAX_ATTACHMENT_FILES ? 'Maximum 5 attachments reached' : 'Attach files (max 5, 5 MB each)'}
                       className="flex items-center justify-center h-8 w-8 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <Paperclip className="h-4 w-4" />
                     </button>
                     <VisibilityDropdown
-                      value={visibility}
+                      value={chatVisibility}
                       onValueChange={handleVisibilityChange}
                       disabled={busy || !wsConnected}
                     />
@@ -1368,7 +1358,7 @@ export default function ChatView({
                       onClick={() => void handleSubmit()}
                       disabled={
                         !wsConnected ||
-                        (!prompt.trim() && attachments.length === 0)
+                        (!chatInput.trim() && chatAttachments.length === 0)
                       }
                       variant="default"
                       size="icon"
@@ -1511,8 +1501,8 @@ export default function ChatView({
         onOpenChange={setShowSubscriptionPopup}
         reason={subscriptionReason}
         returnTo={`/chat/${projectIdFromUrl ?? ''}`}
-        pendingPrompt={blockedPromptRef.current ?? prompt ?? ''}
-        pendingVisibility={visibility}
+        pendingPrompt={blockedPromptRef.current ?? chatInput ?? ''}
+        pendingVisibility={chatVisibility}
       />
       <AutoReloadDialog
         open={showAutoReloadDialog}

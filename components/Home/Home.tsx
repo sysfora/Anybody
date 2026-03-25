@@ -19,19 +19,22 @@ import { useProject } from "@/context/ProjectContext";
 import { PublicProjects } from "@/components/Home/PublicProjects";
 import { AttachmentPreviews, type AttachmentMeta } from "@/components/Dashboard/ChatMessages";
 import { cn } from "@/lib/utils";
+import { clearLastChatSlug } from "@/app/chat/chat-shell";
 
 export const Content = () => {
     const router = useRouter();
     const { toast } = useToast();
-    const { setPendingSubmission } = useProject();
+    const { 
+        chatInput, setChatInput, 
+        chatVisibility, setChatVisibility, 
+        chatAttachments, setChatAttachments, 
+        setShouldAutoSubmit 
+    } = useProject();
     const [mounted, setMounted] = useState(false);
-    const [appIdea, setAppIdea] = useState('');
     const [placeholder, setPlaceholder] = useState('');
-    const [visibility, setVisibility] = useState<VisibilityOption>("public");
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [showSubscriptionPopup, setShowSubscriptionPopup] = useState(false);
     const [subscriptionReason, setSubscriptionReason] = useState<"private_project" | "out_of_limits">("out_of_limits");
-    const [attachments, setAttachments] = useState<File[]>([]);
     const textareaRef = React.useRef<HTMLTextAreaElement>(null);
     const fileInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -43,7 +46,7 @@ export const Content = () => {
             if (userId) {
                 const canCreate = await canCreatePrivateProject(userId);
                 if (canCreate) {
-                    setVisibility("private");
+                    setChatVisibility("private");
                 }
             }
         };
@@ -55,9 +58,9 @@ export const Content = () => {
             if (raw) {
                 const data = JSON.parse(raw) as SubscriptionResumeData;
                 if (data.returnTo === '/') {
-                    if (data.pendingPrompt) setAppIdea(data.pendingPrompt);
+                    if (data.pendingPrompt) setChatInput(data.pendingPrompt);
                     if (data.pendingVisibility === 'public' || data.pendingVisibility === 'private') {
-                        setVisibility(data.pendingVisibility);
+                        setChatVisibility(data.pendingVisibility);
                     }
                     localStorage.removeItem(SUBSCRIPTION_RESUME_KEY);
                 }
@@ -110,24 +113,11 @@ export const Content = () => {
         typeWriter();
     }, []);
 
-    const toBase64 = (file: File): Promise<string> => {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.readAsDataURL(file);
-            reader.onload = () => {
-                const result = reader.result as string;
-                const base64 = result.split(',')[1];
-                resolve(base64);
-            };
-            reader.onerror = (error) => reject(error);
-        });
-    };
-
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = Array.from(e.target.files || []);
         if (files.length === 0) return;
 
-        const totalAttachments = attachments.length + files.length;
+        const totalAttachments = chatAttachments.length + files.length;
         if (totalAttachments > 5) {
             toast({
                 title: 'Too many files',
@@ -149,18 +139,18 @@ export const Content = () => {
             return true;
         });
 
-        setAttachments((prev) => [...prev, ...validFiles]);
+        setChatAttachments((prev) => [...prev, ...validFiles]);
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
     const handleRemoveAttachment = (attachment: AttachmentMeta) => {
-        setAttachments((prev) => prev.filter((f) => f.name !== attachment.name || f.size !== attachment.size));
+        setChatAttachments((prev) => prev.filter((f) => f.name !== attachment.name || f.size !== attachment.size));
     };
 
     const [attachmentMetas, setAttachmentMetas] = useState<AttachmentMeta[]>([]);
 
     useEffect(() => {
-        const metas = attachments.map((f) => ({
+        const metas = chatAttachments.map((f) => ({
             name: f.name,
             url: URL.createObjectURL(f),
             mimeType: f.type,
@@ -170,10 +160,10 @@ export const Content = () => {
         return () => {
             metas.forEach((m) => URL.revokeObjectURL(m.url));
         };
-    }, [attachments]);
+    }, [chatAttachments]);
 
     const handleBuild = async () => {
-        const message = appIdea.trim();
+        const message = chatInput.trim();
         if (!message) return;
 
         const userId = pb.authStore.model?.id;
@@ -188,38 +178,11 @@ export const Content = () => {
             return;
         }
 
-        if (visibility === "private") {
-            const canCreate = await canCreatePrivateProject(userId);
-            if (!canCreate) {
-                setSubscriptionReason("private_project");
-                setShowSubscriptionPopup(true);
-                return;
-            }
-        }
-
-        const isOutOfLimits = await checkProjectLimit(userId);
-        if (isOutOfLimits) {
-            setSubscriptionReason("out_of_limits");
-            setShowSubscriptionPopup(true);
-            return;
-        }
-
         setIsSubmitting(true);
 
-        const pendingFiles = await Promise.all(
-            attachments.map(async (f) => ({
-                name: f.name,
-                type: f.type,
-                size: f.size,
-                data: await toBase64(f),
-            })),
-        );
+        setShouldAutoSubmit(true);
 
-        setPendingSubmission({
-            message,
-            visibility,
-            files: pendingFiles,
-        });
+        clearLastChatSlug();
         router.push('/chat');
     };
 
@@ -243,11 +206,11 @@ export const Content = () => {
             }
         }
 
-        setVisibility(newVisibility);
+        setChatVisibility(newVisibility);
     };
 
     const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-        setAppIdea(e.target.value);
+        setChatInput(e.target.value);
 
         if (textareaRef.current) {
             const cursorPosition = textareaRef.current.selectionStart;
@@ -304,11 +267,12 @@ export const Content = () => {
                 <div className="max-w-2xl mx-auto px-4 sm:px-0">
                     <div className="relative group">
                         <div className="bg-white dark:bg-black border-2 border-border rounded-2xl p-3 sm:p-4 hover:border-[#da2a1d] hover:shadow-[0_0_30px_rgba(218,42,29,0.6)] focus-within:border-[#da2a1d] focus-within:shadow-[0_0_30px_rgba(218,42,29,0.6)] transition-all duration-300 max-h-[350px] sm:max-h-[400px] flex flex-col">
-                            {attachments.length > 0 && (
+                            {chatAttachments.length > 0 && (
                                 <div className="px-1 pt-1">
                                     <AttachmentPreviews
                                         attachments={attachmentMetas}
                                         onRemove={handleRemoveAttachment}
+                                        variant="input"
                                     />
                                 </div>
                             )}
@@ -316,7 +280,7 @@ export const Content = () => {
                                 <Textarea
                                     ref={textareaRef}
                                     placeholder={placeholder}
-                                    value={appIdea}
+                                    value={chatInput}
                                     onChange={handleTextareaChange}
                                     onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
                                         if (e.key === 'Enter' && !e.shiftKey) {
@@ -346,7 +310,7 @@ export const Content = () => {
                                         <Paperclip className="h-4 w-4" />
                                     </Button>
                                     <VisibilityDropdown
-                                        value={visibility}
+                                        value={chatVisibility}
                                         onValueChange={handleVisibilityChange}
                                     />
                                 </div>
@@ -354,7 +318,7 @@ export const Content = () => {
                                     variant="default"
                                     size="icon"
                                     onClick={() => void handleBuild()}
-                                    disabled={isSubmitting || !appIdea.trim()}
+                                    disabled={isSubmitting || (!chatInput.trim() && chatAttachments.length === 0)}
                                     className="rounded-full h-8 w-8 sm:h-10 sm:w-10 bg-black dark:bg-white text-white dark:text-black hover:bg-black/70 dark:hover:bg-white/70"
                                 >
                                     {isSubmitting ? (
@@ -374,8 +338,8 @@ export const Content = () => {
                 onOpenChange={setShowSubscriptionPopup}
                 reason={subscriptionReason}
                 returnTo="/"
-                pendingPrompt={appIdea}
-                pendingVisibility={visibility}
+                pendingPrompt={chatInput}
+                pendingVisibility={chatVisibility}
             />
         </section>
     );

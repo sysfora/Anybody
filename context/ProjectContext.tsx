@@ -7,18 +7,6 @@ type DeviceSize = "mobile" | "tablet" | "desktop"
 export type ProjectStatus = "idle" | "generating" | "modifying" | "building" | "uploading" | "completed" | "cancelled" | "error"
 type VisibilityOption = "public" | "private"
 
-interface PendingFile {
-  name: string
-  type: string
-  size: number
-  data: string // base64 encoded
-}
-
-interface PendingSubmission {
-  message: string | null
-  visibility: VisibilityOption | null
-  files: PendingFile[]
-}
 
 interface ProjectContextType {
   projectName: string | null
@@ -28,7 +16,10 @@ interface ProjectContextType {
   deviceSize: DeviceSize
   isFullscreen: boolean
   previewUrl: string | null
-  pendingSubmission: PendingSubmission
+  chatInput: string
+  chatAttachments: File[]
+  chatVisibility: VisibilityOption
+  shouldAutoSubmit: boolean
   setProjectName: (name: string | null) => void
   setUserId: (id: string | null) => void
   setStatus: (status: ProjectStatus) => void
@@ -36,8 +27,10 @@ interface ProjectContextType {
   setDeviceSize: (size: DeviceSize) => void
   setIsFullscreen: (fullscreen: boolean) => void
   setPreviewUrl: (url: string | null) => void
-  setPendingSubmission: (submission: PendingSubmission) => void
-  clearPendingSubmission: () => void
+  setChatInput: (input: string) => void
+  setChatAttachments: React.Dispatch<React.SetStateAction<File[]>>
+  setChatVisibility: (visibility: VisibilityOption) => void
+  setShouldAutoSubmit: (submit: boolean) => void
   refreshPreview: () => void
   setRefreshCallback: (callback: (() => void) | null) => void
 }
@@ -52,11 +45,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [deviceSize, setDeviceSize] = useState<DeviceSize>("desktop")
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-  const [pendingSubmission, setPendingSubmission] = useState<PendingSubmission>({
-    message: null,
-    visibility: null,
-    files: []
-  })
+  const [chatInput, setChatInput] = useState("")
+  const [chatAttachments, setChatAttachments] = useState<File[]>([])
+  const [chatVisibility, setChatVisibility] = useState<VisibilityOption>("public")
+  const [shouldAutoSubmit, setShouldAutoSubmit] = useState(false)
 
   const refreshCallbackRef = useRef<(() => void) | null>(null)
 
@@ -77,13 +69,6 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     refreshCallbackRef.current = callback
   }, [])
 
-  const clearPendingSubmission = useCallback(() => {
-    setPendingSubmission({
-      message: null,
-      visibility: null,
-      files: []
-    })
-  }, [])
 
   return (
     <ProjectContext.Provider
@@ -95,7 +80,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         deviceSize,
         isFullscreen,
         previewUrl,
-        pendingSubmission,
+        chatInput,
+        chatAttachments,
+        chatVisibility,
+        shouldAutoSubmit,
         setProjectName,
         setUserId,
         setStatus,
@@ -103,8 +91,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         setDeviceSize,
         setIsFullscreen,
         setPreviewUrl,
-        setPendingSubmission,
-        clearPendingSubmission,
+        setChatInput,
+        setChatAttachments,
+        setChatVisibility,
+        setShouldAutoSubmit,
         refreshPreview,
         setRefreshCallback,
       }}
