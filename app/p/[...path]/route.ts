@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { rewriteAbsolutePaths } from '@/lib/rewrite-html-paths';
 import pb from '@/lib/pocketbase';
 import { cookies } from 'next/headers';
 import type { RecordModel } from 'pocketbase';
@@ -321,26 +320,10 @@ export async function GET(
     };
 
     if (isPrimaryHtml && storedHtml) {
-      const publicPath = `${username}/${projectName}`;
-      const isolationSnippet = `<meta name="color-scheme" content="light"><style>:root { color-scheme: light !important; } body { background-color: white; color: black; margin: 0; min-height: 100vh; }</style>`;
-      let isolatedHtml = storedHtml;
-      if (storedHtml.includes('<head>')) {
-        isolatedHtml = storedHtml.replace('<head>', '<head>' + isolationSnippet);
-      } else if (storedHtml.includes('<html>')) {
-          isolatedHtml = storedHtml.replace('<html>', '<html><head>' + isolationSnippet + '</head>');
-      } else {
-        isolatedHtml = isolationSnippet + storedHtml;
-      }
-      const processedContent = rewriteAbsolutePaths(
-        isolatedHtml,
-        'text/html',
-        publicPath,
-      );
-
       const isRaw = searchParams.get('raw') === 'true';
 
       if (isRaw) {
-        return new NextResponse(processedContent, {
+        return new NextResponse(storedHtml, {
           status: 200,
           headers: {
             'Content-Type': 'text/html; charset=utf-8',
@@ -351,7 +334,6 @@ export async function GET(
 
       // Return iframe wrapper for absolute isolation
       const rawUrl = `${request.nextUrl.pathname}${request.nextUrl.search ? request.nextUrl.search + '&' : '?'}raw=true`;
-      const appOrigin = `${request.nextUrl.protocol}//${request.nextUrl.host}`;
       const wrapperHtml = `<!DOCTYPE html>
 <html>
 <head>
@@ -403,8 +385,8 @@ export async function GET(
 </head>
 <body>
   <iframe src="${rawUrl}" title="${projectName} preview"></iframe>
-  <a class="ab-badge" href="${appOrigin}" target="_blank" rel="noopener noreferrer" title="Built with Anybody.dev">
-    <img src="${appOrigin}/Favicon.png" alt="Anybody.dev logo" />
+  <a class="ab-badge" href="/" target="_blank" rel="noopener noreferrer" title="Built with Anybody.dev">
+    <img src="/Favicon.png" alt="Anybody.dev logo" />
     <span>Anybody.dev</span>
   </a>
 </body>
