@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import pb from '@/lib/pocketbase';
-import { getSessionRecord } from '@/lib/session-user';
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getSessionRecord();
-    if (!session?.id) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    // Server-side preview worker (and only it) should call this endpoint.
+    // If `PREVIEW_WORKER_SECRET` is set, require the caller to send
+    // `x-preview-worker-secret` with the correct value.
+    const expected = process.env.PREVIEW_WORKER_SECRET;
+    if (expected) {
+      const provided = request.headers.get('x-preview-worker-secret') ?? '';
+      if (provided !== expected) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
     }
 
     const formData = await request.formData();

@@ -26,6 +26,8 @@ import re
 import time
 from pathlib import Path
 
+import httpx
+
 try:
     from dotenv import load_dotenv
 
@@ -137,6 +139,203 @@ _generation_tasks: dict[str, asyncio.Task] = {}
 # catch-up snapshot and join the live broadcast room.
 # Shape: { project_id: { request_id, thinking_acc, html_acc, reply } }
 _active_generations: dict[str, dict] = {}
+
+# ---------------------------------------------------------------------------
+# Server-side project preview generation queue
+# ---------------------------------------------------------------------------
+#
+# Client-side preview capture is intentionally removed. Instead, whenever the
+# client submits a new prompt for a project, we enqueue a preview job.
+# A single background worker generates previews sequentially and only when
+# the project is not currently in "generating" state.
+#
+# Notes:
+# - This is an in-memory queue (good enough for local/dev).
+# - If a new prompt arrives while a preview render is in-flight, the job is
+#   marked stale via `queued_at` and will be regenerated later.
+_preview_jobs_lock = asyncio.Lock()
+_preview_jobs: dict[str, dict] = {}
+_preview_worker_task: asyncio.Task | None = None
+
+PREVIEW_WORKER_MAX_ATTEMPTS: int = int(os.environ.get("PREVIEW_WORKER_MAX_ATTEMPTS", "3"))
+PREVIEW_WORKER_IDLE_SLEEP_S: float = float(os.environ.get("PREVIEW_WORKER_IDLE_SLEEP_S", "2.0"))
+PREVIEW_WORKER_WAIT_FOR_PAINT_S: float = float(os.environ.get("PREVIEW_WORKER_WAIT_FOR_PAINT_S", "3.0"))
+
+
+def _ensure_preview_worker_running() -> None:
+    global _preview_worker_task
+    if _preview_worker_task is None or _preview_worker_task.done():
+        _preview_worker_task = asyncio.create_task(_preview_worker_loop())
+
+
+async def _enqueue_preview(project_id: str) -> None:
+    if not project_id:
+        return
+    now = time.time()
+    async with _preview_jobs_lock:
+        job = _preview_jobs.get(project_id)
+        if job:
+            job["queued_at"] = now
+            job["attempts"] = int(job.get("attempts", 0))
+            job["state"] = "queued"
+        else:
+            _preview_jobs[project_id] = {
+                "queued_at": now,
+                "attempts": 0,
+                "state": "queued",  # queued | generating
+            }
+    _ensure_preview_worker_running()
+
+
+async def _render_html_to_preview_jpeg(html: str) -> bytes:
+    """
+    Render HTML to a 1280x720 JPEG using Playwright.
+    """
+    # Lazy import so dev environments without Playwright can still run WS.
+    from playwright.async_api import async_playwright
+
+    viewport = {"width": 1280, "height": 720}
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-gpu", "--no-sandbox"],
+        )
+        context = await browser.new_context(viewport=viewport, device_scale_factor=1)
+        page = await context.new_page()
+
+        async def _route(route, request):
+            url = request.url
+            # Avoid DNS stalls for placeholder images; the rest of the page can still render.
+            if "via.placeholder.com" in url or "placeholder.com" in url:
+                await route.abort()
+                return
+            await route.continue_()
+
+        await page.route("**/*", _route)
+        await page.set_content(html, wait_until="load")
+
+        # Force a white background like the previous client-side capture.
+        await page.add_style_tag(content="html, body { background: #ffffff !important; color-scheme: light; }")
+        await page.wait_for_timeout(int(PREVIEW_WORKER_WAIT_FOR_PAINT_S * 1000))
+
+        jpeg_bytes = await page.screenshot(
+            type="jpeg",
+            quality=80,
+            clip={"x": 0, "y": 0, "width": 1280, "height": 720},
+        )
+        await context.close()
+        await browser.close()
+        return jpeg_bytes
+
+
+async def _upload_preview_to_next(project_id: str, jpeg_bytes: bytes) -> None:
+    app_url = (os.environ.get("NEXT_PUBLIC_APP_URL") or "http://localhost:3000").rstrip("/")
+    secret = os.environ.get("PREVIEW_WORKER_SECRET") or ""
+    headers: dict[str, str] = {}
+    if secret:
+        headers["x-preview-worker-secret"] = secret
+
+    timeout_s = 120.0
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        resp = await client.post(
+            f"{app_url}/api/projects/preview",
+            data={"project_id": project_id},
+            files={"preview": ("preview.jpg", jpeg_bytes, "image/jpeg")},
+            headers=headers,
+        )
+        resp.raise_for_status()
+
+
+async def _preview_worker_loop() -> None:
+    logger.info("ws_app: preview worker started")
+    while True:
+        try:
+            await _preview_worker_tick()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("ws_app: preview worker tick failed")
+            await asyncio.sleep(5.0)
+
+
+async def _preview_worker_tick() -> None:
+    async with _preview_jobs_lock:
+        candidate_ids = [
+            project_id
+            for project_id, job in _preview_jobs.items()
+            if job.get("state") in ("queued", "generating")
+        ]
+
+    if not candidate_ids:
+        await asyncio.sleep(PREVIEW_WORKER_IDLE_SLEEP_S)
+        return
+
+    chosen_project_id: str | None = None
+    chosen_html: str = ""
+    chosen_expected_queued_at: float | None = None
+
+    # Fetch project states in the same PocketBase admin session.
+    async with pocketbase_admin() as pb:
+        for project_id in candidate_ids:
+            try:
+                project = pb.collection("projects").get_one(project_id)
+            except Exception:
+                logger.exception("ws_app: preview worker failed fetching project_id=%s", project_id)
+                continue
+
+            status = str(getattr(project, "status", "") or "").lower()
+            if status == "generating":
+                continue
+
+            html = str(getattr(project, "html", "") or "")
+            if not html.strip():
+                logger.warning("ws_app: preview worker: empty html project_id=%s", project_id)
+                continue
+
+            async with _preview_jobs_lock:
+                job = _preview_jobs.get(project_id)
+                if not job or job.get("state") not in ("queued", "generating"):
+                    continue
+                chosen_project_id = project_id
+                chosen_html = html
+                chosen_expected_queued_at = float(job.get("queued_at", 0))
+                job["state"] = "generating"
+            break
+
+    if not chosen_project_id or chosen_expected_queued_at is None:
+        await asyncio.sleep(PREVIEW_WORKER_IDLE_SLEEP_S)
+        return
+
+    try:
+        jpeg_bytes = await _render_html_to_preview_jpeg(chosen_html)
+        await _upload_preview_to_next(chosen_project_id, jpeg_bytes)
+    except Exception:
+        logger.exception("ws_app: preview render/upload failed project_id=%s", chosen_project_id)
+        async with _preview_jobs_lock:
+            job = _preview_jobs.get(chosen_project_id)
+            if not job:
+                return
+            job["attempts"] = int(job.get("attempts", 0)) + 1
+            if int(job["attempts"]) >= PREVIEW_WORKER_MAX_ATTEMPTS:
+                _preview_jobs.pop(chosen_project_id, None)
+            else:
+                job["state"] = "queued"
+        return
+
+    # If a new prompt arrived after we queued the job, `queued_at` changes and
+    # we must not publish a stale preview.
+    async with _preview_jobs_lock:
+        job = _preview_jobs.get(chosen_project_id)
+        if not job:
+            return
+        current_queued_at = float(job.get("queued_at", 0))
+        if current_queued_at != chosen_expected_queued_at:
+            job["state"] = "queued"
+            # Count as an attempt; the next render will use the latest HTML.
+            job["attempts"] = int(job.get("attempts", 0)) + 1
+            return
+
+        _preview_jobs.pop(chosen_project_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -976,7 +1175,12 @@ async def user_message(sid, data):
 
     if request_id in _generation_tasks and not _generation_tasks[request_id].done():
         logger.warning("duplicate request_id=%s ignored", request_id)
+        if project_id:
+            await _enqueue_preview(project_id)
         return
+
+    if project_id:
+        await _enqueue_preview(project_id)
 
     t = asyncio.create_task(
         _stream_generation(sid, text, request_id, project_id, user_message_id, attachments)

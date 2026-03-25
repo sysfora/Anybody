@@ -42,7 +42,6 @@ import { SUBSCRIPTION_RESUME_KEY, SubscriptionPopup, type SubscriptionResumeData
 import { AutoReloadDialog } from '@/components/AutoReloadDialog';
 import { clearLastChatSlug } from '@/app/chat/chat-shell';
 import { toast } from 'sonner';
-import * as htmlToImage from 'html-to-image';
 
 /** sessionStorage helpers for per-project prompt persistence */
 const promptKey = (slug: string) => `chat_prompt_${encodeURIComponent(slug)}`;
@@ -272,46 +271,6 @@ export default function ChatView({
     }
   }, []);
 
-  const capturePreview = useCallback(() => {
-    // Capture preview after layout is ready
-    setTimeout(async () => {
-      try {
-        const pbId = projectPbIdRef.current;
-        if (!pbId || !sessionAuthedRef.current) return;
-
-        const iframe = document.querySelector('iframe[title="Preview"]') as HTMLIFrameElement;
-        if (!iframe || !iframe.contentWindow?.document.body) return;
-
-        const body = iframe.contentWindow.document.body;
-        const dataUrl = await htmlToImage.toJpeg(body, {
-          quality: 0.8,
-          backgroundColor: '#ffffff',
-          height: 720,
-          width: 1280,
-          style: { overflow: 'hidden' }
-        });
-
-        const res = await fetch(dataUrl);
-        const blob = await res.blob();
-
-        const formData = new FormData();
-        formData.append('project_id', pbId);
-        formData.append('preview', blob, 'preview.jpg');
-
-        const uploadRes = await fetch('/api/projects/preview', {
-          method: 'POST',
-          body: formData,
-        });
-
-        if (!uploadRes.ok) {
-          console.warn("Failed to upload project preview via API");
-        }
-      } catch (err) {
-        console.warn("Failed to capture project preview:", err);
-      }
-    }, 3000);
-  }, []);
-
   const handleRefreshPreview = useCallback(() => {
     setIframeKey((k) => k + 1);
   }, []);
@@ -477,14 +436,9 @@ export default function ChatView({
         }
         setProjectLoadStatus(st);
         setStatus(mapProjectStatusFromPb(st));
-
-        // Auto-generate preview if missing and project is completed
-        if (!data.project?.preview && st === 'completed' && typeof data.html === 'string' && data.html.trim().length > 0) {
-          capturePreview();
-        }
       }
     },
-    [clearGenerationWatchdog, setStatus, setChatVisibility, capturePreview],
+    [clearGenerationWatchdog, setStatus, setChatVisibility],
   );
 
   useEffect(() => {
@@ -766,9 +720,6 @@ export default function ChatView({
         if (!data || data === 'not-found') return;
         applyProjectLoad(data, { force: true });
       })();
-
-      // Capture preview after layout is ready
-      capturePreview();
     };
 
     const onGenerationError = (payload: {
