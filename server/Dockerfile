@@ -11,6 +11,11 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
+# `pip --prefix=/install` does not place packages on Python's default sys.path,
+# so `python -m playwright` would fail to import. Install Playwright into the
+# builder environment too (small extra cost) so we can download Chromium.
+RUN python -m pip install --no-cache-dir playwright==1.58.0
+
 # Download browser binaries during build.
 RUN python -m playwright install chromium
 
@@ -21,6 +26,9 @@ WORKDIR /app
 
 # Playwright downloads Chromium into this path.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# Avoid interactive prompts during apt-get.
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Chromium runtime deps (Debian/Ubuntu slim).
 # Kept as a single layer for smaller rebuilds.
@@ -54,8 +62,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 \
     libxkbcommon0 \
     libxrandr2 \
-    libxshmfence1 \
-    libxrender1 \
     libxshmfence1 \
     libxrender1 \
     libu2f-udev \
