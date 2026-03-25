@@ -49,17 +49,35 @@ export async function POST(request: NextRequest) {
       finalName = randomSlugFromWords(words);
     }
 
-    // 3. Create the new remixed project for the user
-    const remixedProject = await pb.collection('projects').create({
-      user: effectiveUserId,
-      name: finalName,
-      html: sourceProject.html || '',
-      visibility: 'public', // Default to public for remixed projects
-      status: 'completed',
-      deployed: true, // Auto-deploy remixed projects
-    });
+    // 3. Fetch source preview image if present
+    let previewBlob: Blob | null = null;
+    if (sourceProject.preview) {
+      try {
+        const pbUrl = process.env.POCKETBASE_URL || process.env.NEXT_PUBLIC_POCKETBASE_URL || 'http://127.0.0.1:8090';
+        const previewUrl = `${pbUrl}/api/files/projects/${sourceProject.id}/${sourceProject.preview}`;
+        const res = await fetch(previewUrl);
+        if (res.ok) {
+          previewBlob = await res.blob();
+        }
+      } catch {
+        // Non-fatal — create the project without a preview if the fetch fails
+      }
+    }
 
-    // 4. Add the "Project remixed" message from AI assistant
+    // 4. Create the new remixed project for the user
+    const createData = new FormData();
+    createData.append('user', effectiveUserId);
+    createData.append('name', finalName);
+    createData.append('html', sourceProject.html || '');
+    createData.append('visibility', 'public');
+    createData.append('status', 'completed');
+    createData.append('deployed', 'true');
+    if (previewBlob) {
+      createData.append('preview', previewBlob, 'preview.jpg');
+    }
+    const remixedProject = await pb.collection('projects').create(createData);
+
+    // 5. Add the "Project remixed" message from AI assistant
     await pb.collection('project_messages').create({
       project: remixedProject.id,
       role: 'assistant',
