@@ -9,10 +9,9 @@ Supported providers: OpenRouter, OpenAI, Anthropic.
 Usage
 -----
     service = AIService()
-    await service.load_keys(pb)          # call once at startup
 
-    # Streaming (Agent type)
-    async for chunk in service.complete_stream(messages, "Agent", system=PROMPT):
+    # Streaming (Agent type) — loads ``api_Keys`` from PocketBase on each call
+    async for chunk in service.complete_stream(messages, "Agent", pb, system=PROMPT):
         if chunk["type"] == "model":
             print("Using:", chunk["content"])
         elif chunk["type"] == "thinking":
@@ -21,7 +20,7 @@ Usage
             ...  # visible output tokens
 
     # Non-streaming (Optimizer type)
-    result = await service.complete(messages, "Optimizer", system=PROMPT)
+    result = await service.complete(messages, "Optimizer", pb, system=PROMPT)
 """
 from __future__ import annotations
 
@@ -496,10 +495,8 @@ _DEFAULT_TIMEOUT = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0
 class AIService:
     """Priority-based AI model service with automatic failover.
 
-    Keys are fetched from the PocketBase ``api_Keys`` collection once via
-    ``load_keys()``, then cached in memory.  Call ``load_keys()`` again any
-    time you want to refresh the cache (e.g. after adding/editing keys in the
-    admin panel).
+    Keys are read from the PocketBase ``api_Keys`` collection on every
+    ``complete_stream`` / ``complete`` call (no in-memory cache).
 
     Model selection
     ---------------
@@ -509,16 +506,9 @@ class AIService:
     rate limit, overload, etc.).
     """
 
-    def __init__(self) -> None:
-        self._keys: list[ApiKey] = []
-        self._lock = asyncio.Lock()
-
-    # ------------------------------------------------------------------
-    # Key management
-    # ------------------------------------------------------------------
-
-    async def load_keys(self, pb: PocketBase) -> None:
-        """Fetch all API keys from PocketBase and cache them sorted by priority."""
+    @staticmethod
+    async def fetch_keys_for_type(pb: PocketBase, key_type: KeyType) -> list[ApiKey]:
+        """Load keys of *key_type* from PocketBase, sorted by priority (ascending)."""
 
         def _fetch() -> list[ApiKey]:
             records = pb.collection(COLLECTION_API_KEYS).get_full_list(
@@ -543,23 +533,16 @@ class AIService:
 
         try:
             keys = await asyncio.to_thread(_fetch)
-            async with self._lock:
-                self._keys = keys
-            logger.info(
-                "ai_service: loaded %d API key(s) (%d Agent, %d Optimizer)",
-                len(keys),
-                sum(1 for k in keys if k.type == "Agent"),
-                sum(1 for k in keys if k.type == "Optimizer"),
-            )
         except Exception:
             logger.exception("ai_service: failed to load API keys from PocketBase")
+            return []
 
-    def get_keys(self, type: KeyType) -> list[ApiKey]:
-        """Return valid keys of the given type sorted by priority (ascending)."""
-        return sorted(
-            [k for k in self._keys if k.type == type and k.api.strip() and k.model.strip()],
-            key=lambda k: k.priority,
-        )
+        filtered = [
+            k
+            for k in keys
+            if k.type == key_type and k.api.strip() and k.model.strip()
+        ]
+        return sorted(filtered, key=lambda k: k.priority)
 
     # ------------------------------------------------------------------
     # Streaming completion
@@ -568,7 +551,8 @@ class AIService:
     async def complete_stream(
         self,
         messages: list[dict[str, Any]],
-        type: KeyType = "Agent",
+        type: KeyType,
+        pb: PocketBase,
         *,
         system: str | None = None,
         max_tokens: int = 16384,
@@ -580,7 +564,7 @@ class AIService:
           ``{"type": "thinking", "content": "..."}``                   — reasoning tokens
           ``{"type": "text",     "content": "..."}``                   — visible output tokens
         """
-        keys = self.get_keys(type)
+        keys = await self.fetch_keys_for_type(pb, type)
         if not keys:
             raise AINoKeysError(f"No API keys configured for type '{type}'")
 
@@ -719,7 +703,7 @@ class AIService:
 
         Returns the full response text as a string.
         """
-        keys = self.get_keys(type)
+        keys = await self.fetch_keys_for_type(pb, type)
         if not keys:
             raise AINoKeysError(f"No API keys configured for type '{type}'")
 

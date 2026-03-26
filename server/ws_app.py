@@ -8,7 +8,7 @@ Run: uvicorn ws_app:app --host 0.0.0.0 --port 5000 --reload
 
 AI model selection
 ------------------
-API keys are loaded from the PocketBase ``api_Keys`` collection on first use.
+API keys are read from the PocketBase ``api_Keys`` collection on each AI call.
 Models are tried in ascending priority order; on token-limit, rate-limit, or
 overload errors the service automatically falls back to the next model.
 
@@ -38,6 +38,7 @@ except ImportError:
     pass
 
 import socketio
+from pocketbase import PocketBase
 
 from ai_service import AIAllFailedError, AINoKeysError, AIService, ContinuationParser, ModifyStreamParser, StreamParser
 from pocketbase_save import (
@@ -98,27 +99,6 @@ MAX_CONTINUATION_ATTEMPTS = 3
 # ---------------------------------------------------------------------------
 
 _ai_service: AIService = AIService()
-_ai_keys_loaded = False
-_ai_load_lock = asyncio.Lock()
-
-
-async def _ensure_ai_loaded() -> AIService:
-    """Load API keys from PocketBase on first call, then return the service."""
-    global _ai_keys_loaded
-    if _ai_keys_loaded:
-        return _ai_service
-    async with _ai_load_lock:
-        if _ai_keys_loaded:
-            return _ai_service
-        try:
-            async with pocketbase_admin() as pb:
-                await _ai_service.load_keys(pb)
-            _ai_keys_loaded = True
-        except RuntimeError:
-            logger.warning("ws_app: PocketBase not configured — AI keys not loaded")
-        except Exception:
-            logger.exception("ws_app: failed to load AI keys")
-    return _ai_service
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +111,7 @@ sio = socketio.AsyncServer(
     logger=False,
     engineio_logger=False,
 )
-app = socketio.ASGIApp(sio)
+_sio_asgi_inner = socketio.ASGIApp(sio)
 
 _generation_tasks: dict[str, asyncio.Task] = {}
 
@@ -206,15 +186,21 @@ async def _maybe_scan_projects_without_preview() -> None:
                 project, "dateCreated", None
             )
             created_ts: float | None = None
-            if isinstance(created_raw, str) and created_raw.strip():
-                try:
-                    import datetime
+            if created_raw is not None:
+                import datetime as _dt
 
-                    # PocketBase usually returns RFC3339 (e.g. 2026-03-25T12:34:56.789Z)
-                    dt = datetime.datetime.fromisoformat(
-                        created_raw.replace("Z", "+00:00")
-                    )
-                    created_ts = dt.timestamp()
+                try:
+                    if isinstance(created_raw, _dt.datetime):
+                        c = created_raw
+                        if c.tzinfo is None:
+                            c = c.replace(tzinfo=_dt.timezone.utc)
+                        created_ts = c.timestamp()
+                    elif isinstance(created_raw, str) and created_raw.strip():
+                        # PocketBase usually returns RFC3339 (e.g. 2026-03-25T12:34:56.789Z)
+                        c = _dt.datetime.fromisoformat(
+                            created_raw.replace("Z", "+00:00")
+                        )
+                        created_ts = c.timestamp()
                 except Exception:
                     created_ts = None
 
@@ -228,7 +214,9 @@ async def _maybe_scan_projects_without_preview() -> None:
             html_val = getattr(project, "html", "") or ""
             if not str(html_val).strip():
                 continue
-            await _enqueue_preview(project_id)
+            await _enqueue_preview(
+                project_id, require_updated_since_enqueue=False
+            )
 
 
 def _ensure_preview_worker_running() -> None:
@@ -237,7 +225,18 @@ def _ensure_preview_worker_running() -> None:
         _preview_worker_task = asyncio.create_task(_preview_worker_loop())
 
 
-async def _enqueue_preview(project_id: str) -> None:
+async def _enqueue_preview(
+    project_id: str, *, require_updated_since_enqueue: bool = True
+) -> None:
+    """Queue a server-side preview render for *project_id*.
+
+    When *require_updated_since_enqueue* is True (user just sent a prompt), the
+    worker waits until ``projects.updated`` is >= enqueue time so we do not
+    screenshot HTML before the final patch lands.
+
+    Backfill scans set this to False: completed projects have ``updated`` in the
+    past, so the timestamp guard would otherwise block forever.
+    """
     if not project_id:
         return
     now = time.time()
@@ -247,11 +246,16 @@ async def _enqueue_preview(project_id: str) -> None:
             job["queued_at"] = now
             job["attempts"] = int(job.get("attempts", 0))
             job["state"] = "queued"
+            job["require_updated_since_enqueue"] = bool(
+                job.get("require_updated_since_enqueue", False)
+                or require_updated_since_enqueue
+            )
         else:
             _preview_jobs[project_id] = {
                 "queued_at": now,
                 "attempts": 0,
                 "state": "queued",  # queued | generating
+                "require_updated_since_enqueue": require_updated_since_enqueue,
             }
     _ensure_preview_worker_running()
 
@@ -343,7 +347,8 @@ async def _upload_preview_to_next(project_id: str, jpeg_bytes: bytes) -> None:
 
 async def _preview_worker_loop() -> None:
     logger.info("ws_app: preview worker started")
-    next_scan_at = time.time() + PREVIEW_WORKER_SCAN_INTERVAL_S
+    # Run one backfill scan soon after startup; later scans use the interval.
+    next_scan_at = time.time()
     while True:
         try:
             if time.time() >= next_scan_at:
@@ -399,14 +404,20 @@ async def _preview_worker_tick() -> None:
                 project, "dateUpdated", None
             )
             updated_ts: float | None = None
-            if isinstance(updated_raw, str) and updated_raw.strip():
-                try:
-                    import datetime
+            if updated_raw is not None:
+                import datetime as _dt
 
-                    dt = datetime.datetime.fromisoformat(
-                        updated_raw.replace("Z", "+00:00")
-                    )
-                    updated_ts = dt.timestamp()
+                try:
+                    if isinstance(updated_raw, _dt.datetime):
+                        u = updated_raw
+                        if u.tzinfo is None:
+                            u = u.replace(tzinfo=_dt.timezone.utc)
+                        updated_ts = u.timestamp()
+                    elif isinstance(updated_raw, str) and updated_raw.strip():
+                        u = _dt.datetime.fromisoformat(
+                            updated_raw.replace("Z", "+00:00")
+                        )
+                        updated_ts = u.timestamp()
                 except Exception:
                     updated_ts = None
 
@@ -415,10 +426,15 @@ async def _preview_worker_tick() -> None:
                 if not job or job.get("state") not in ("queued", "generating"):
                     continue
                 chosen_expected_queued_at = float(job.get("queued_at", 0))
+                require_updated = job.get("require_updated_since_enqueue", True)
 
-                if updated_ts is not None and updated_ts < chosen_expected_queued_at:
-                    # Project hasn't been patched since we enqueued the job.
-                    # Leave the job queued for the next tick.
+                if (
+                    require_updated
+                    and updated_ts is not None
+                    and updated_ts < chosen_expected_queued_at
+                ):
+                    # User-prompt enqueue: wait until HTML is patched after queue time.
+                    # (Backfill jobs set require_updated_since_enqueue=False.)
                     continue
                 chosen_project_id = project_id
                 chosen_html = html
@@ -614,7 +630,9 @@ async def _stream_generation(
 ) -> None:
     assistant_message_id: str | None = None
     cm = None
+    cm_keys = None
     pb = None
+    pb_keys = None
     thinking_acc = ""
     html_acc = ""
     since_thinking_flush = 0
@@ -633,6 +651,21 @@ async def _stream_generation(
                 logger.warning("ws_app: PocketBase not configured — streaming without DB")
                 cm = None
                 pb = None
+
+        # PocketBase client for loading ``api_Keys`` (same connection as project DB when set).
+        pb_keys = pb
+        if pb_keys is None:
+            try:
+                cm_keys = pocketbase_admin()
+                pb_keys = await cm_keys.__aenter__()
+            except RuntimeError:
+                logger.warning("ws_app: PocketBase not configured — AI keys unavailable")
+                cm_keys = None
+                pb_keys = None
+            except Exception:
+                logger.exception("ws_app: failed to open PocketBase for API keys")
+                cm_keys = None
+                pb_keys = None
 
         # Fetch the current HTML before resetting — used to detect modification mode.
         existing_html = ""
@@ -667,14 +700,16 @@ async def _stream_generation(
             await sio.enter_room(sid, f"project-{project_id}")
 
         # ── AI generation ──────────────────────────────────────────────────
-        service = await _ensure_ai_loaded()
-        use_ai = bool(service.get_keys("Agent"))
+        use_ai = False
+        if pb_keys is not None:
+            agent_keys = await AIService.fetch_keys_for_type(pb_keys, "Agent")
+            use_ai = bool(agent_keys)
 
         if use_ai:
             ta_holder = {"val": thinking_acc}
             ha_holder = {"val": html_acc}
             reply_text = await _run_ai_generation(
-                service=service,
+                service=_ai_service,
                 user_text=user_text,
                 existing_html=existing_html,
                 attachments=attachments or [],
@@ -682,6 +717,7 @@ async def _stream_generation(
                 project_id=project_id,
                 emit_target=emit_target,
                 pb=pb,
+                pb_ai=pb_keys,
                 assistant_message_id=assistant_message_id,
                 thinking_acc_holder=ta_holder,
                 html_acc_holder=ha_holder,
@@ -774,6 +810,8 @@ async def _stream_generation(
     finally:
         if project_id:
             _active_generations.pop(project_id, None)
+        if cm_keys is not None:
+            await cm_keys.__aexit__(None, None, None)
         if cm is not None:
             await cm.__aexit__(None, None, None)
 
@@ -781,7 +819,9 @@ async def _stream_generation(
 OPTIMIZER_MAX_CHARS = 250
 
 
-async def _maybe_optimize_prompt(service: AIService, user_text: str) -> str:
+async def _maybe_optimize_prompt(
+    service: AIService, user_text: str, pb: PocketBase
+) -> str:
     """Return an optimized version of ``user_text`` when it is short enough.
 
     The optimizer is skipped for prompts >= OPTIMIZER_MAX_CHARS characters
@@ -789,13 +829,14 @@ async def _maybe_optimize_prompt(service: AIService, user_text: str) -> str:
     """
     if len(user_text) >= OPTIMIZER_MAX_CHARS:
         return user_text
-    if not service.get_keys("Optimizer"):
+    if not await AIService.fetch_keys_for_type(pb, "Optimizer"):
         logger.debug("ws_app: optimizer skipped — no Optimizer keys configured")
         return user_text
     try:
         optimized = await service.complete(
             [{"role": "user", "content": user_text}],
             "Optimizer",
+            pb,
             system=OPTIMIZER_PROMPT,
             max_tokens=1024,
         )
@@ -875,6 +916,7 @@ async def _run_ai_generation(
     project_id: str | None,
     emit_target: str,
     pb,
+    pb_ai,
     assistant_message_id: str | None,
     thinking_acc_holder: dict,
     html_acc_holder: dict,
@@ -965,7 +1007,11 @@ async def _run_ai_generation(
     )
     is_modification = bool(existing_html and existing_html.strip()) or _is_remixed
     # Optimizer only runs on short new prompts, not on modifications
-    prompt = user_text if is_modification else await _maybe_optimize_prompt(service, user_text)
+    prompt = (
+        user_text
+        if is_modification
+        else await _maybe_optimize_prompt(service, user_text, pb_ai)
+    )
 
     def _make_user_message(text: str) -> dict:
         """Return an OpenAI-style user message, multimodal when attachments exist.
@@ -1014,7 +1060,7 @@ async def _run_ai_generation(
 
         try:
             async for ai_chunk in service.complete_stream(
-                chat_messages, "Agent", system=AGENT_PROMPT
+                chat_messages, "Agent", pb_ai, system=AGENT_PROMPT
             ):
                 t, content = ai_chunk["type"], ai_chunk["content"]
                 if t == "model":
@@ -1088,7 +1134,7 @@ async def _run_ai_generation(
             cont_parser = ContinuationParser()
             try:
                 async for ai_chunk in service.complete_stream(
-                    cont_messages, "Agent", system=CONTINUATION_SYSTEM
+                    cont_messages, "Agent", pb_ai, system=CONTINUATION_SYSTEM
                 ):
                     t, content = ai_chunk["type"], ai_chunk["content"]
                     if t == "model":
@@ -1151,7 +1197,7 @@ async def _run_ai_generation(
 
         try:
             async for ai_chunk in service.complete_stream(
-                call_messages, "Agent", system=MODIFY_PROMPT
+                call_messages, "Agent", pb_ai, system=MODIFY_PROMPT
             ):
                 t, content = ai_chunk["type"], ai_chunk["content"]
                 if t == "model":
@@ -1330,3 +1376,25 @@ async def stop_generation(sid, data):
     if task and not task.done():
         task.cancel()
         logger.info("stop_generation sid=%s request_id=%s", sid, request_id)
+
+
+# ---------------------------------------------------------------------------
+# ASGI entry (lifespan starts preview worker without waiting for Socket.IO)
+# ---------------------------------------------------------------------------
+
+
+async def app(scope, receive, send):
+    if scope["type"] == "lifespan":
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                try:
+                    _ensure_preview_worker_running()
+                except Exception:
+                    logger.exception("ws_app: preview worker failed to start at lifespan")
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+        return
+    await _sio_asgi_inner(scope, receive, send)
