@@ -901,6 +901,56 @@ def _extract_patch_reply(response: str) -> str:
     return lines[-1] if lines else ""
 
 
+class _AssistantVisibleMessageNormalizer:
+    """Normalize visible assistant chat text while streaming.
+
+    - Drops leading newlines before any real content.
+    - Collapses runs of two or more newlines to a single newline.
+    - Trailing newlines are discarded (not emitted); call :meth:`finish` at end.
+    """
+
+    def __init__(self) -> None:
+        self._leading = True
+        self._hold = ""
+        self._after_newline = False
+
+    def feed(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+        s = self._hold + chunk
+        self._hold = ""
+        if self._leading:
+            stripped = s.lstrip("\n")
+            if not stripped:
+                return ""
+            s = stripped
+            self._leading = False
+            self._after_newline = False
+
+        pieces: list[str] = []
+        i = 0
+        while i < len(s):
+            if s[i] != "\n":
+                pieces.append(s[i])
+                self._after_newline = False
+                i += 1
+                continue
+            j = i
+            while j < len(s) and s[j] == "\n":
+                j += 1
+            if j == len(s):
+                self._hold = s[i:j]
+                break
+            if not self._after_newline:
+                pieces.append("\n")
+                self._after_newline = True
+            i = j
+        return "".join(pieces)
+
+    def finish(self) -> None:
+        self._hold = ""
+
+
 # ---------------------------------------------------------------------------
 # AI generation (full + patch modes)
 # ---------------------------------------------------------------------------
@@ -935,6 +985,7 @@ async def _run_ai_generation(
     # ── Shared emit helpers ────────────────────────────────────────────────
 
     _message_acc = [""]  # mutable container so closures can update it
+    _msg_nl = _AssistantVisibleMessageNormalizer()
 
     async def _emit_thinking(chunk: str) -> None:
         thinking_acc_holder["val"] += chunk
@@ -958,10 +1009,13 @@ async def _run_ai_generation(
 
     async def _emit_message(chunk: str) -> None:
         """Stream a visible chat message chunk to the client."""
-        _message_acc[0] += chunk
+        normalized = _msg_nl.feed(chunk)
+        if not normalized:
+            return
+        _message_acc[0] += normalized
         await sio.emit(
             "message_chunk",
-            {"request_id": request_id, "chunk": chunk},
+            {"request_id": request_id, "chunk": normalized},
             room=emit_target,
         )
 
@@ -1170,7 +1224,9 @@ async def _run_ai_generation(
                 )
                 break
 
-        return _message_acc[0].strip() or "Done! Let me know if you'd like any changes."
+        _msg_nl.finish()
+        reply = _message_acc[0].strip("\r\n")
+        return reply or "Done! Let me know if you'd like any changes."
 
     # ── Branch B: patch loop (modification) ───────────────────────────────
     current_html = existing_html
@@ -1282,7 +1338,9 @@ async def _run_ai_generation(
         await _emit_code(current_html[i : i + STREAM_STEP])
         await asyncio.sleep(0.003)
 
-    return _message_acc[0].strip() or "Done! Let me know if you'd like any further changes."
+    _msg_nl.finish()
+    reply = _message_acc[0].strip("\r\n")
+    return reply or "Done! Let me know if you'd like any further changes."
 
 
 # ---------------------------------------------------------------------------

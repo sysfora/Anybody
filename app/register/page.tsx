@@ -194,7 +194,7 @@ function RegisterContent() {
         email,
         password,
         passwordConfirm: confirmPassword,
-        credits: 50,
+        credits: 0,
       };
 
       await pb.collection('users').create(data);

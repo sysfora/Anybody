@@ -20,7 +20,7 @@ export async function POST(request: NextRequest) {
     );
 
     // Update user with username
-    const updatedUser = await pb.collection('users').update(userId, { username, credits: 50 });
+    const updatedUser = await pb.collection('users').update(userId, { username, credits: 0 });
 
     return NextResponse.json({
       success: true,
