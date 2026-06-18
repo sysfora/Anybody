@@ -9,7 +9,7 @@ import pb from "@/lib/pocketbase";
 
 export async function POST(req: NextRequest) {
   try {
-    const { priceId, email, userId } = await req.json();
+    const { priceId, email, userId, credits } = await req.json();
 
     if (!priceId) {
       return NextResponse.json(
@@ -70,6 +70,7 @@ export async function POST(req: NextRequest) {
       metadata: {
         priceId,
         ...(userId ? { userId } : {}),
+        ...(credits ? { credits: String(credits) } : {}),
       },
     };
 

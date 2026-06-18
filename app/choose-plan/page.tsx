@@ -5,31 +5,10 @@ import { Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { STRIPE_PRICES } from "@/lib/stripe";
+import { PRO_PLAN_FEATURES } from "@/lib/plan-features";
 import { toast } from "sonner";
 import pb from "@/lib/pocketbase";
 import { useAuthRedirect } from "@/hooks/use-auth-redirect";
-
-const freePlanFeatures = [
-  "50 credits",
-  "No downloads",
-  "Projects expire in 7 days",
-  "Model trained on your project",
-  "Personal use",
-  "Public projects",
-];
-
-const proPlanFeatures = [
-  "1000 credits per month",
-  "250k context window",
-  "Pay-as-you-go for additional credits",
-  "Unlimited projects",
-  "Unlimited downloads",
-  "Projects never expire",
-  "No model training on your project",
-  "Commercial use",
-  "Private projects",
-  "Team collaboration",
-];
 
 export default function ChoosePlanPage() {
   useAuthRedirect();
@@ -81,7 +60,7 @@ export default function ChoosePlanPage() {
         <div className="mx-auto max-w-2xl space-y-6 text-center mb-12 md:mb-24 pt-8 md:pt-12">
           <h1 className="text-center text-4xl font-semibold lg:text-5xl">Pricing that Scales with You</h1>
           <p className="text-muted-foreground">
-            Select the plan that best fits your needs
+            Upgrade to Pro to unlock all features
           </p>
         </div>
 
@@ -105,41 +84,12 @@ export default function ChoosePlanPage() {
           </Tabs>
         </div>
 
-        <div className="grid gap-6 md:grid-cols-5 md:gap-0">
-          {/* Free Plan */}
-          <div className="rounded-2xl flex flex-col justify-between space-y-8 border p-6 md:col-span-2 md:my-6 md:rounded-r-none md:border-r-0 lg:p-10">
-            <div className="space-y-4">
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <h2 className="font-medium">Free</h2>
-                  <span className="text-xs bg-primary/10 text-primary px-3 py-1 rounded-full font-medium">
-                    Current Plan
-                  </span>
-                </div>
-                <span className="my-3 block text-2xl font-semibold">$0 / forever</span>
-              </div>
-
-              <ul className="list-outside space-y-3 text-sm">
-                {freePlanFeatures.map((item, index) => (
-                  <li
-                    key={index}
-                    className="flex items-center gap-2">
-                    <Check className="size-3" />
-                    {item}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-
-          {/* Pro Plan */}
-          <div className="rounded-2xl border bg-sidebar p-6 md:col-span-3 lg:p-10">
+        <div className="max-w-2xl mx-auto">
+          <div className="rounded-2xl border bg-sidebar p-6 lg:p-10">
             <div className="grid gap-6 sm:grid-cols-2">
               <div className="space-y-4">
                 <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <h2 className="font-medium">Pro</h2>
-                  </div>
+                  <h2 className="font-medium mb-2">Pro</h2>
                   <span className="my-3 block text-2xl font-semibold">${price} / {period}</span>
                 </div>
 
@@ -160,15 +110,15 @@ export default function ChoosePlanPage() {
               </div>
 
               <div>
-                <div className="text-sm font-medium">Everything in free plus :</div>
+                <div className="text-sm font-medium">What&apos;s included</div>
 
                 <ul className="mt-4 list-outside space-y-3 text-sm">
-                  {proPlanFeatures.map((item, index) => (
+                  {PRO_PLAN_FEATURES.map((item, index) => (
                     <li
                       key={index}
                       className="flex items-center gap-2">
                       <Check className="size-3" />
-                      {item}
+                      {item.label}
                     </li>
                   ))}
                 </ul>

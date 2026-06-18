@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
 import pb from '@/lib/pocketbase';
+import { getBillingCycleForPriceId, getCreditsForPriceId } from '@/lib/stripe';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: '2025-11-17.clover',
@@ -54,12 +55,8 @@ export async function POST(request: NextRequest) {
 
     const subscription = subscriptions.data[0];
     const priceId = subscription.items.data[0]?.price.id;
-    
-    // Determine billing cycle based on price ID
-    const isMonthly = priceId === process.env.NEXT_PUBLIC_STRIPE_MONTHLY_PRICE_ID;
-    const isYearly = priceId === process.env.NEXT_PUBLIC_STRIPE_YEARLY_PRICE_ID;
-    
-    const billingCycle = isYearly ? 'yearly' : isMonthly ? 'monthly' : null;
+    const billingCycle = priceId ? getBillingCycleForPriceId(priceId) : null;
+    const subscriptionCredits = priceId ? getCreditsForPriceId(priceId) : undefined;
     const isActive = subscription.status === 'active' || subscription.status === 'trialing';
 
     // Access subscription properties safely
@@ -69,6 +66,7 @@ export async function POST(request: NextRequest) {
       hasActiveSubscription: isActive,
       plan: isActive ? 'pro' : 'free',
       billingCycle: billingCycle,
+      subscriptionCredits,
       status: subscription.status,
       currentPeriodEnd: subData.current_period_end ? subData.current_period_end * 1000 : undefined,
       cancelAtPeriodEnd: subData.cancel_at_period_end || false,

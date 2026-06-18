@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Check, Loader2, AlertTriangle } from "lucide-react";
+import { Loader2, AlertTriangle, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CreditTierDropdown } from "@/components/ui/credit-tier-dropdown";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -15,36 +16,24 @@ import {
 import { toast } from "sonner";
 import pb from "@/lib/pocketbase";
 import { useRouter } from "next/navigation";
-import { STRIPE_PRICES } from "@/lib/stripe";
+import {
+  CREDIT_TIERS,
+  DEFAULT_CREDIT_TIER,
+  getCreditTierByCredits,
+  getTierDisplayPrice,
+  getTierPriceId,
+  type BillingCycle,
+  type CreditTier,
+} from "@/lib/stripe";
+import { PRO_PLAN_FEATURES } from "@/lib/plan-features";
 import { Sidebar } from "@/components/Dashboard/Sidebar";
 import { NavigationBar } from "@/components/NavigationBar";
 
-const freePlanFeatures = [
-  "50 credits",
-  "No downloads",
-  "Projects expire in 7 days",
-  "Model trained on your project",
-  "Personal use",
-  "Public projects",
-];
-
-const proPlanFeatures = [
-  "1000 credits per month",
-  "250k context window",
-  "Pay-as-you-go for additional credits",
-  "Unlimited projects",
-  "Unlimited downloads",
-  "Projects never expire",
-  "No model training on your project",
-  "Commercial use",
-  "Private projects",
-  "Team collaboration",
-];
-
 interface SubscriptionStatus {
   hasActiveSubscription: boolean;
-  plan: 'free' | 'pro';
-  billingCycle: 'monthly' | 'yearly' | null;
+  plan: "free" | "pro";
+  billingCycle: "monthly" | "yearly" | null;
+  subscriptionCredits?: number;
   status: string | null;
   currentPeriodEnd?: number;
   cancelAtPeriodEnd?: boolean;
@@ -55,20 +44,26 @@ interface PocketBaseUser {
   email?: string;
   plan?: string;
   stripe_id?: string;
+  credits?: number;
   [key: string]: unknown;
 }
 
 export default function SubscriptionPage() {
   const router = useRouter();
   const [user, setUser] = useState<PocketBaseUser | null>(null);
-  const [subscriptionStatus, setSubscriptionStatus] = useState<SubscriptionStatus | null>(null);
+  const [subscriptionStatus, setSubscriptionStatus] =
+    useState<SubscriptionStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [portalLoading, setPortalLoading] = useState(false);
-  const [upgradeLoading, setUpgradeLoading] = useState(false);
-  const [billingCycle, setBillingCycle] = useState<"monthly" | "yearly">("monthly");
-  const [selectedBillingCycle, setSelectedBillingCycle] = useState<"monthly" | "yearly">("monthly");
+  const [subscribeLoading, setSubscribeLoading] = useState(false);
+  const [selectedTier, setSelectedTier] = useState<CreditTier>(DEFAULT_CREDIT_TIER);
+  const [billingCycle, setBillingCycle] = useState<BillingCycle>("monthly");
+  const [selectedBillingCycle, setSelectedBillingCycle] =
+    useState<BillingCycle>("monthly");
   const [showWarningDialog, setShowWarningDialog] = useState(false);
-  const [pendingBillingCycle, setPendingBillingCycle] = useState<"monthly" | "yearly" | null>(null);
+  const [pendingBillingCycle, setPendingBillingCycle] = useState<
+    BillingCycle | null
+  >(null);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -79,18 +74,22 @@ export default function SubscriptionPage() {
           return;
         }
 
-        // Fetch user data via the server-side API (requires admin auth)
         const profileRes = await fetch("/api/user/get-profile", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ userId }),
         });
+        let userData: PocketBaseUser | null = null;
         if (profileRes.ok) {
-          const userData = await profileRes.json();
+          userData = await profileRes.json();
           setUser(userData);
+
+          const tierFromCredits = getCreditTierByCredits(userData?.credits ?? 0);
+          if (tierFromCredits) {
+            setSelectedTier(tierFromCredits);
+          }
         }
 
-        // Fetch Stripe subscription status
         const statusResponse = await fetch("/api/subscription/status", {
           method: "POST",
           headers: {
@@ -102,11 +101,19 @@ export default function SubscriptionPage() {
         if (statusResponse.ok) {
           const status = await statusResponse.json();
           setSubscriptionStatus(status);
-          
-          // Set billing cycle from Stripe if available, otherwise default to monthly
+
           if (status.billingCycle) {
             setBillingCycle(status.billingCycle);
             setSelectedBillingCycle(status.billingCycle);
+          }
+
+          if (status.subscriptionCredits) {
+            const tierFromSubscription = getCreditTierByCredits(
+              status.subscriptionCredits
+            );
+            if (tierFromSubscription) {
+              setSelectedTier(tierFromSubscription);
+            }
           }
         }
       } catch (error) {
@@ -153,12 +160,10 @@ export default function SubscriptionPage() {
     }
   };
 
-  const handleBillingCycleChange = (newCycle: "monthly" | "yearly") => {
-    // Always update the selected billing cycle to reflect the tab change
-    // Don't show warning on tab switch - only show when button is clicked
+  const handleBillingCycleChange = (newCycle: BillingCycle) => {
     setSelectedBillingCycle(newCycle);
-    
-    if (!isPro) {
+
+    if (!hasActiveSubscription) {
       setBillingCycle(newCycle);
     }
   };
@@ -167,19 +172,21 @@ export default function SubscriptionPage() {
     if (!pendingBillingCycle) return;
 
     try {
-      setUpgradeLoading(true);
+      setSubscribeLoading(true);
       setShowWarningDialog(false);
-      
-        const userId = pb.authStore.record?.id;
+
+      const userId = pb.authStore.record?.id;
       const response = await fetch("/api/stripe/checkout", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          priceId: STRIPE_PRICES[pendingBillingCycle],
+          priceId: getTierPriceId(selectedTier, pendingBillingCycle),
           email: user?.email || pb.authStore.record?.email,
           userId: userId,
+          credits: selectedTier.credits,
+          billingCycle: pendingBillingCycle,
         }),
       });
 
@@ -195,61 +202,55 @@ export default function SubscriptionPage() {
     } catch (error) {
       console.error(error);
       toast.error("Something went wrong. Please try again.");
-      setUpgradeLoading(false);
+      setSubscribeLoading(false);
     }
   };
 
-  const handleBillingCycleUpgrade = async () => {
-    if (!isPro) return;
+  const handleBillingCycleChangeConfirm = async () => {
+    if (!hasActiveSubscription) return;
 
     const targetCycle = selectedBillingCycle;
     if (targetCycle === currentBillingCycle) {
-      // If already on this cycle, just open portal
       await handleCancel();
       return;
     }
 
-    // Show warning and proceed with upgrade/downgrade
     setPendingBillingCycle(targetCycle);
     setShowWarningDialog(true);
   };
 
-  const handleUpgrade = async () => {
+  const handleSubscribe = async () => {
     try {
-      if (isPro) {
-        // If on Pro, redirect to portal to downgrade
-        await handleCancel();
-      } else {
-        // If on Free, go directly to checkout with selected billing cycle
-        setUpgradeLoading(true);
-        const userId = pb.authStore.record?.id;
+      setSubscribeLoading(true);
+      const userId = pb.authStore.record?.id;
 
-        const response = await fetch("/api/stripe/checkout", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            priceId: STRIPE_PRICES[billingCycle],
-            email: user?.email || pb.authStore.record?.email,
-            userId: userId,
-          }),
-        });
+      const response = await fetch("/api/stripe/checkout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          priceId: getTierPriceId(selectedTier, billingCycle),
+          email: user?.email || pb.authStore.record?.email,
+          userId: userId,
+          credits: selectedTier.credits,
+          billingCycle,
+        }),
+      });
 
-        const { url, error } = await response.json();
+      const { url, error } = await response.json();
 
-        if (error) {
-          throw new Error(error);
-        }
+      if (error) {
+        throw new Error(error);
+      }
 
-        if (url) {
-          window.location.href = url;
-        }
+      if (url) {
+        window.location.href = url;
       }
     } catch (error) {
       console.error(error);
       toast.error("Something went wrong. Please try again.");
-      setUpgradeLoading(false);
+      setSubscribeLoading(false);
     }
   };
 
@@ -267,13 +268,29 @@ export default function SubscriptionPage() {
     );
   }
 
-  // Use Stripe subscription status if available, otherwise fall back to PocketBase plan
-  const isPro = subscriptionStatus?.hasActiveSubscription || subscriptionStatus?.plan === "pro" || user?.plan === "pro" || user?.plan === "Pro";
+  const hasActiveSubscription =
+    subscriptionStatus?.hasActiveSubscription ?? false;
   const currentBillingCycle = subscriptionStatus?.billingCycle || billingCycle;
-  const displayBillingCycle = isPro ? selectedBillingCycle : billingCycle;
-  const proPrice = displayBillingCycle === "yearly" ? 200 : 20;
-  const proPeriod = displayBillingCycle === "yearly" ? "year" : "month";
-  const needsBillingCycleChange = isPro && selectedBillingCycle !== currentBillingCycle;
+  const displayBillingCycle = hasActiveSubscription
+    ? selectedBillingCycle
+    : billingCycle;
+  const monthlyPrice = selectedTier.price;
+  const annualTotal = getTierDisplayPrice(selectedTier, "yearly");
+  const needsBillingCycleChange =
+    hasActiveSubscription && selectedBillingCycle !== currentBillingCycle;
+  const isActionLoading = subscribeLoading || portalLoading;
+
+  const handleUpgrade = async () => {
+    if (hasActiveSubscription) {
+      if (needsBillingCycleChange) {
+        await handleBillingCycleChangeConfirm();
+        return;
+      }
+      await handleCancel();
+      return;
+    }
+    await handleSubscribe();
+  };
 
   return (
     <div className="min-h-screen">
@@ -281,267 +298,186 @@ export default function SubscriptionPage() {
       <Sidebar />
       <main className="md:ml-16 pt-14">
         <div className="h-[calc(100vh-3.5rem)] overflow-auto">
-          <div className="flex items-center justify-center p-4 bg-background pb-16 md:pb-32">
-            <div className="w-full max-w-5xl px-6">
-        <div className="mx-auto max-w-2xl space-y-6 text-center mb-12 md:mb-24 pt-8 md:pt-12">
-          <h1 className="text-center text-4xl font-semibold lg:text-5xl">Pricing that Scales with You</h1>
-          <p className="text-muted-foreground">
-            Manage your subscription and billing
-          </p>
-        </div>
+          <div className="flex min-h-full items-center justify-center p-4 sm:p-6">
+            <div
+              role="dialog"
+              aria-labelledby="subscription-title"
+              className="w-full max-w-md overflow-hidden rounded-2xl border border-border bg-background shadow-lg dark:bg-[#171717] sm:max-w-lg"
+            >
+              <div className="space-y-6 p-6">
+                <header className="space-y-2">
+                  <h1
+                    id="subscription-title"
+                    className="text-2xl font-bold tracking-tight sm:text-3xl"
+                  >
+                    Upgrade to Pro
+                  </h1>
+                  <p className="text-sm leading-relaxed text-muted-foreground">
+                    Unlock all features and take your projects to the next level
+                  </p>
+                </header>
 
-        <div className="flex justify-center mb-8">
-          <Tabs
-            value={displayBillingCycle}
-            onValueChange={(value) => handleBillingCycleChange(value as "monthly" | "yearly")}
-            className="inline-flex"
-          >
-            <TabsList className="rounded-2xl border bg-background p-1">
-              <TabsTrigger value="monthly" className="rounded-xl font-medium data-[state=active]:bg-sidebar">
-                Monthly
-              </TabsTrigger>
-              <TabsTrigger value="yearly" className="rounded-xl font-medium relative data-[state=active]:bg-sidebar">
-                Yearly
-                <span className="ml-2 text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium">
-                  Save 17%
-                </span>
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-        </div>
+                {hasActiveSubscription && subscriptionStatus?.cancelAtPeriodEnd && (
+                  <p className="text-sm text-muted-foreground">
+                    Your subscription will cancel at the end of the current
+                    period.
+                  </p>
+                )}
 
-        {isPro && subscriptionStatus?.cancelAtPeriodEnd && (
-          <div className="flex justify-center mb-8">
-            <div className="text-sm text-orange-500">
-              Your subscription will cancel at the end of the current period
-            </div>
-          </div>
-        )}
-
-        <div className="grid gap-6 md:grid-cols-5 md:gap-0">
-          {/* Free Plan - Always First */}
-          <div className="rounded-2xl flex flex-col justify-between space-y-8 border p-6 md:col-span-2 md:my-6 md:rounded-r-none md:border-r-0 lg:p-10">
-            <div className="space-y-4">
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <h2 className="font-medium">Free</h2>
-                  {!isPro && (
-                    <span className="text-xs bg-primary/10 text-primary px-3 py-1 rounded-full font-medium">
-                      Current Plan
+                <div className="space-y-1">
+                  <div
+                    key={monthlyPrice}
+                    className="flex items-baseline justify-start gap-1 animate-in fade-in duration-200"
+                  >
+                    <span className="text-4xl font-bold tabular-nums tracking-tight">
+                      ${monthlyPrice}
                     </span>
-                  )}
+                    <span className="text-base text-muted-foreground">
+                      / month
+                    </span>
+                  </div>
+                  {displayBillingCycle === "yearly" ? (
+                    <p className="text-sm text-muted-foreground animate-in fade-in duration-200">
+                      Billed annually at ${annualTotal}
+                    </p>
+                  ) : null}
                 </div>
-                <span className="my-3 block text-2xl font-semibold">$0 / forever</span>
-              </div>
 
-              {isPro && (
+                <div className="flex items-center justify-start gap-3">
+                  <Switch
+                    id="billing-cycle"
+                    size="lg"
+                    checked={displayBillingCycle === "yearly"}
+                    onCheckedChange={(checked) =>
+                      handleBillingCycleChange(checked ? "yearly" : "monthly")
+                    }
+                    disabled={isActionLoading}
+                  />
+                  <label
+                    htmlFor="billing-cycle"
+                    className="text-sm font-medium text-foreground cursor-pointer select-none"
+                  >
+                    Annual
+                  </label>
+                </div>
+
                 <Button
                   onClick={handleUpgrade}
-                  disabled={upgradeLoading || portalLoading}
-                  variant="outline"
-                  className="w-full">
-                  {(upgradeLoading || portalLoading) ? (
+                  disabled={isActionLoading}
+                  className="h-11 w-full rounded-xl text-base font-semibold transition-all duration-200 hover:opacity-90"
+                  size="lg"
+                >
+                  {isActionLoading ? (
                     <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Loading...
+                      <Loader2 className="mr-2 size-4 animate-spin" />
+                      {hasActiveSubscription ? "Loading..." : "Processing..."}
                     </>
+                  ) : hasActiveSubscription ? (
+                    needsBillingCycleChange
+                      ? displayBillingCycle === "yearly"
+                        ? "Switch to Annual"
+                        : "Switch to Monthly"
+                      : "Manage Subscription"
                   ) : (
-                    "Downgrade to Free"
+                    "Upgrade"
                   )}
                 </Button>
-              )}
 
+                <CreditTierDropdown
+                  tiers={CREDIT_TIERS}
+                  value={selectedTier}
+                  onValueChange={setSelectedTier}
+                  billingCycle="monthly"
+                  showPrices={false}
+                  disabled={isActionLoading || hasActiveSubscription}
+                />
 
-              <ul className="list-outside space-y-3 text-sm">
-                {freePlanFeatures.map((item, index) => (
-                  <li
-                    key={index}
-                    className="flex items-center gap-2">
-                    <Check className="size-3" />
-                    {item}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-
-          {/* Pro Plan - Always Second */}
-          <div className="rounded-2xl border bg-sidebar p-6 md:col-span-3 lg:p-10">
-            <div className="grid gap-6 sm:grid-cols-2">
-              <div className="space-y-4">
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <h2 className="font-medium">Pro</h2>
-                    {isPro && (
-                      <span className="text-xs bg-primary/10 text-primary px-3 py-1 rounded-full font-medium">
-                        Current Plan
-                      </span>
-                    )}
-                  </div>
-                  <span className="my-3 block text-2xl font-semibold">${proPrice} / {proPeriod}</span>
-                  {isPro && subscriptionStatus?.status && (
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Status: <span className="capitalize font-medium">{subscriptionStatus.status}</span>
-                    </p>
-                  )}
-                </div>
-
-                {isPro ? (
-                  needsBillingCycleChange ? (
-                    <div className="space-y-2">
-                      <Button
-                        onClick={handleBillingCycleUpgrade}
-                        disabled={upgradeLoading || portalLoading}
-                        variant={selectedBillingCycle === "yearly" ? "default" : "outline"}
-                        className="w-full">
-                        {(upgradeLoading || portalLoading) ? (
-                          <>
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            Loading...
-                          </>
-                        ) : selectedBillingCycle === "yearly" ? (
-                          "Upgrade to Yearly"
-                        ) : (
-                          "Downgrade to Monthly"
-                        )}
-                      </Button>
-                      <Button
-                        onClick={handleCancel}
-                        disabled={portalLoading}
-                        variant="outline"
-                        className="w-full">
-                        {portalLoading ? (
-                          <>
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            Loading...
-                          </>
-                        ) : (
-                          "Manage Subscription"
-                        )}
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      <Button
-                        onClick={handleCancel}
-                        disabled={portalLoading}
-                        variant="outline"
-                        className="w-full">
-                        {portalLoading ? (
-                          <>
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            Loading...
-                          </>
-                        ) : (
-                          "Manage Subscription"
-                        )}
-                      </Button>
-                      {subscriptionStatus?.cancelAtPeriodEnd && (
-                        <p className="text-xs text-orange-500 text-center">
-                          Cancels at period end
-                        </p>
-                      )}
-                    </div>
-                  )
-                ) : (
-                  <Button
-                    onClick={handleUpgrade}
-                    disabled={upgradeLoading || portalLoading}
-                    variant="default"
-                    className="w-full">
-                    {upgradeLoading ? (
-                      <>
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        Loading...
-                      </>
-                    ) : (
-                      "Upgrade to Pro"
-                    )}
-                  </Button>
-                )}
+                <section aria-label="Plan features">
+                  <ul className="space-y-3">
+                    {PRO_PLAN_FEATURES.map(({ label }) => (
+                      <li
+                        key={label}
+                        className="flex items-center gap-3"
+                      >
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#F5F5F5] dark:bg-[#262626]">
+                          <Check className="size-3.5 text-foreground" aria-hidden />
+                        </span>
+                        <span className="text-sm text-foreground">{label}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
               </div>
-
-              <div>
-                <div className="text-sm font-medium">Everything in free plus :</div>
-
-                <ul className="mt-4 list-outside space-y-3 text-sm">
-                  {proPlanFeatures.map((item, index) => (
-                    <li
-                      key={index}
-                      className="flex items-center gap-2">
-                      <Check className="size-3" />
-                      {item}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Warning Dialog for Billing Cycle Change */}
-        <Dialog 
-          open={showWarningDialog} 
-          onOpenChange={(open) => {
-            setShowWarningDialog(open);
-            if (!open) {
-              // Revert to current billing cycle if dialog is closed
-              setSelectedBillingCycle(currentBillingCycle);
-              setPendingBillingCycle(null);
-            }
-          }}
-        >
-          <DialogContent className="rounded-2xl">
-            <DialogHeader>
-              <div className="flex items-center gap-3 mb-2">
-                <div className="w-10 h-10 rounded-full bg-orange-100 dark:bg-orange-900 flex items-center justify-center">
-                  <AlertTriangle className="w-5 h-5 text-orange-600 dark:text-orange-400" />
-                </div>
-                <DialogTitle className="text-xl">Change Billing Cycle?</DialogTitle>
-              </div>
-              <DialogDescription className="text-base pt-2">
-                You are about to change your billing cycle from{" "}
-                <strong className="font-semibold capitalize">{currentBillingCycle}</strong> to{" "}
-                <strong className="font-semibold capitalize">{pendingBillingCycle}</strong>.
-                <br />
-                <br />
-                This will create a new checkout session to update your subscription billing cycle.
-              </DialogDescription>
-            </DialogHeader>
-            <DialogFooter className="gap-2">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setShowWarningDialog(false);
-                  setSelectedBillingCycle(currentBillingCycle);
-                  setPendingBillingCycle(null);
-                }}
-                className="rounded-xl"
-              >
-                Cancel
-              </Button>
-              <Button
-                onClick={handleConfirmBillingCycleChange}
-                disabled={upgradeLoading}
-                className="rounded-xl"
-              >
-                {upgradeLoading ? (
-                  <>
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    Loading...
-                  </>
-                ) : (
-                  "Continue"
-                )}
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
             </div>
           </div>
         </div>
       </main>
+
+      <Dialog
+        open={showWarningDialog}
+        onOpenChange={(open) => {
+          setShowWarningDialog(open);
+          if (!open) {
+            setSelectedBillingCycle(currentBillingCycle);
+            setPendingBillingCycle(null);
+          }
+        }}
+      >
+        <DialogContent className="rounded-2xl">
+          <DialogHeader>
+            <div className="mb-2 flex items-center gap-3">
+              <div className="flex size-10 items-center justify-center rounded-full bg-muted">
+                <AlertTriangle className="size-5 text-foreground" />
+              </div>
+              <DialogTitle className="text-xl">
+                Change Billing Cycle?
+              </DialogTitle>
+            </div>
+            <DialogDescription className="pt-2 text-base">
+              You are about to change your billing cycle from{" "}
+              <strong className="font-semibold capitalize">
+                {currentBillingCycle}
+              </strong>{" "}
+              to{" "}
+              <strong className="font-semibold capitalize">
+                {pendingBillingCycle}
+              </strong>
+              .
+              <br />
+              <br />
+              This will create a new checkout session to update your
+              subscription billing cycle.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowWarningDialog(false);
+                setSelectedBillingCycle(currentBillingCycle);
+                setPendingBillingCycle(null);
+              }}
+              className="rounded-xl"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleConfirmBillingCycleChange}
+              disabled={subscribeLoading}
+              className="rounded-xl"
+            >
+              {subscribeLoading ? (
+                <>
+                  <Loader2 className="mr-2 size-4 animate-spin" />
+                  Loading...
+                </>
+              ) : (
+                "Continue"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
-

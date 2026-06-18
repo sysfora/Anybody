@@ -1,9 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Check } from "lucide-react";
+import { Loader2, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -11,22 +10,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { STRIPE_PRICES } from "@/lib/stripe";
+import { CreditTierDropdown } from "@/components/ui/credit-tier-dropdown";
+import { Switch } from "@/components/ui/switch";
+import {
+  CREDIT_TIERS,
+  DEFAULT_CREDIT_TIER,
+  getTierDisplayPrice,
+  getTierPriceId,
+  type BillingCycle,
+  type CreditTier,
+} from "@/lib/stripe";
+import { PRO_PLAN_FEATURES } from "@/lib/plan-features";
 import { toast } from "sonner";
 import pb from "@/lib/pocketbase";
-
-const features = [
-  "1000 credits per month",
-  "250k context window",
-  "Pay-as-you-go for additional credits",
-  "Unlimited projects",
-  "Unlimited downloads",
-  "Projects never expire",
-  "No model training on your project",
-  "Commercial use",
-  "Private projects",
-  "Team collaboration",
-];
 
 export const SUBSCRIPTION_RESUME_KEY = "subscriptionResume";
 
@@ -40,11 +36,8 @@ interface SubscriptionPopupProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   reason?: "private_project" | "out_of_limits";
-  /** Page the user was on when the popup was triggered (e.g. "/" or "/chat"). */
   returnTo?: string;
-  /** Text the user had typed before being interrupted. */
   pendingPrompt?: string;
-  /** Visibility they had selected. */
   pendingVisibility?: string;
 }
 
@@ -56,11 +49,12 @@ export function SubscriptionPopup({
   pendingPrompt,
   pendingVisibility,
 }: SubscriptionPopupProps) {
-  const [billingCycle, setBillingCycle] = useState<"monthly" | "yearly">("monthly");
+  const [selectedTier, setSelectedTier] = useState<CreditTier>(DEFAULT_CREDIT_TIER);
+  const [billingCycle, setBillingCycle] = useState<BillingCycle>("monthly");
   const [loading, setLoading] = useState(false);
 
-  const price = billingCycle === "monthly" ? 20 : 200;
-  const period = billingCycle === "monthly" ? "mo" : "year";
+  const monthlyPrice = selectedTier.price;
+  const annualTotal = getTierDisplayPrice(selectedTier, "yearly");
 
   const getTitle = () => {
     if (reason === "private_project") {
@@ -69,7 +63,7 @@ export function SubscriptionPopup({
     if (reason === "out_of_limits") {
       return "You've Reached Your Limit";
     }
-    return "Upgrade To Pro";
+    return "Upgrade to Pro";
   };
 
   const getDescription = () => {
@@ -86,7 +80,6 @@ export function SubscriptionPopup({
     try {
       setLoading(true);
 
-      // Persist the user's context so we can restore it after Stripe returns.
       const resumeData: SubscriptionResumeData = {
         returnTo: returnTo ?? (typeof window !== "undefined" ? window.location.pathname : "/"),
         pendingPrompt: pendingPrompt ?? "",
@@ -95,9 +88,10 @@ export function SubscriptionPopup({
       try {
         localStorage.setItem(SUBSCRIPTION_RESUME_KEY, JSON.stringify(resumeData));
       } catch {
-        // localStorage unavailable (e.g. private browsing) — proceed anyway
+        // localStorage unavailable — proceed anyway
       }
 
+      const userId = pb.authStore.record?.id;
       const userEmail = pb.authStore.record?.email;
 
       const response = await fetch("/api/stripe/checkout", {
@@ -106,8 +100,11 @@ export function SubscriptionPopup({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          priceId: STRIPE_PRICES[billingCycle],
+          priceId: getTierPriceId(selectedTier, billingCycle),
           email: userEmail,
+          userId,
+          credits: selectedTier.credits,
+          billingCycle,
         }),
       });
 
@@ -129,79 +126,91 @@ export function SubscriptionPopup({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg rounded-2xl border-border p-0">
-        <div className="p-6">
-          <DialogHeader className="space-y-2 pb-4">
-            <DialogTitle className="text-2xl font-bold text-center">
+      <DialogContent className="max-w-md gap-0 overflow-hidden p-0 dark:bg-[#171717] sm:max-w-lg">
+        <div className="space-y-6 p-6">
+          <DialogHeader className="space-y-2 text-left">
+            <DialogTitle className="text-2xl font-bold tracking-tight sm:text-3xl">
               {getTitle()}
             </DialogTitle>
-            <DialogDescription className="text-center text-sm text-muted-foreground">
+            <DialogDescription className="text-sm leading-relaxed">
               {getDescription()}
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-6">
-            {/* Billing Tabs */}
-            <div className="flex justify-center">
-              <Tabs
-                value={billingCycle}
-                onValueChange={(value) => setBillingCycle(value as "monthly" | "yearly")}
-                className="w-full"
-              >
-                <TabsList className="w-full rounded-xl bg-muted/50">
-                  <TabsTrigger value="monthly" className="flex-1 rounded-lg text-sm font-medium">
-                    Monthly
-                  </TabsTrigger>
-                  <TabsTrigger value="yearly" className="flex-1 rounded-lg text-sm font-medium relative">
-                    Yearly
-                    <span className="ml-1.5 text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium">
-                      Save 17%
-                    </span>
-                  </TabsTrigger>
-                </TabsList>
-              </Tabs>
+          <div className="space-y-1">
+            <div
+              key={monthlyPrice}
+              className="flex items-baseline justify-start gap-1 animate-in fade-in duration-200"
+            >
+              <span className="text-4xl font-bold tabular-nums tracking-tight">
+                ${monthlyPrice}
+              </span>
+              <span className="text-base text-muted-foreground">/ month</span>
             </div>
-
-            {/* Price Display */}
-            <div className="text-center space-y-1">
-              <div className="flex items-baseline justify-center gap-2">
-                <span className="text-5xl font-bold tracking-tight">${price}</span>
-                <span className="text-xl text-muted-foreground font-medium">/{period}</span>
-              </div>
-            </div>
-
-            {/* Features List */}
-            <div className="space-y-2.5">
-              <div className="grid grid-cols-1 gap-2.5">
-                {features.map((feature, index) => (
-                  <div key={index} className="flex items-center gap-3">
-                    <div className="rounded-full bg-primary/10 p-1.5 flex-shrink-0">
-                      <Check className="w-3.5 h-3.5 text-primary" />
-                    </div>
-                    <span className="text-sm text-foreground leading-relaxed">{feature}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* CTA Button */}
-            <div className="space-y-3 pt-2">
-              <Button
-                onClick={handleUpgrade}
-                disabled={loading}
-                className="w-full rounded-xl h-11 text-base font-semibold"
-                size="lg"
-              >
-                {loading ? "Processing..." : "Upgrade to Pro"}
-              </Button>
-              <p className="text-center text-xs text-muted-foreground">
-                Cancel anytime. No hidden fees.
+            {billingCycle === "yearly" ? (
+              <p className="text-sm text-muted-foreground animate-in fade-in duration-200">
+                Billed annually at ${annualTotal}
               </p>
-            </div>
+            ) : null}
           </div>
+
+          <div className="flex items-center justify-start gap-3">
+            <Switch
+              id="popup-billing-cycle"
+              size="lg"
+              checked={billingCycle === "yearly"}
+              onCheckedChange={(checked) =>
+                setBillingCycle(checked ? "yearly" : "monthly")
+              }
+              disabled={loading}
+            />
+            <label
+              htmlFor="popup-billing-cycle"
+              className="text-sm font-medium text-foreground cursor-pointer select-none"
+            >
+              Annual
+            </label>
+          </div>
+
+          <Button
+            onClick={handleUpgrade}
+            disabled={loading}
+            className="h-11 w-full rounded-xl text-base font-semibold transition-all duration-200 hover:opacity-90"
+            size="lg"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="mr-2 size-4 animate-spin" />
+                Processing...
+              </>
+            ) : (
+              "Upgrade"
+            )}
+          </Button>
+
+          <CreditTierDropdown
+            tiers={CREDIT_TIERS}
+            value={selectedTier}
+            onValueChange={setSelectedTier}
+            billingCycle="monthly"
+            showPrices={false}
+            disabled={loading}
+          />
+
+          <section aria-label="Plan features">
+            <ul className="space-y-3">
+              {PRO_PLAN_FEATURES.map(({ label }) => (
+                <li key={label} className="flex items-center gap-3">
+                  <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#F5F5F5] dark:bg-[#262626]">
+                    <Check className="size-3.5 text-foreground" aria-hidden />
+                  </span>
+                  <span className="text-sm text-foreground">{label}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
         </div>
       </DialogContent>
     </Dialog>
   );
 }
-
