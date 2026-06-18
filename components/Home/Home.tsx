@@ -7,6 +7,7 @@ import { ArrowUp, Loader2, Paperclip } from 'lucide-react';
 import NextImage from 'next/image';
 import LogoFavicon from '@/assets/LogoFavicon.png';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { Navbar } from "@/components/Home/Navbar";
 import Footer from "@/components/Home/Footer";
 import Background from "@/components/Home/Background";
@@ -241,15 +242,15 @@ export const Content = () => {
             <div className="relative z-10 max-w-4xl mx-auto text-center space-y-6 sm:space-y-5">
                 {/* Logo */}
                 <div className="flex justify-center animate-[float_6s_ease-in-out_infinite]">
-                    <div className="relative">
+                    <Link href="/" className="relative" aria-label="Go to homepage">
                         <NextImage
                             src={LogoFavicon}
-                            alt="Yoo Logo"
+                            alt="Anybody Logo"
                             width={96}
                             height={96}
                             className="h-16 w-16 sm:h-20 sm:w-20 md:h-24 md:w-24 object-contain"
                         />
-                    </div>
+                    </Link>
                 </div>
 
                 {/* Main Heading */}

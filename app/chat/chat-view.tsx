@@ -1297,8 +1297,7 @@ export default function ChatView({
                   What do you want to build?
                 </h3>
                 <p className="text-sm text-muted-foreground max-w-[260px] leading-relaxed">
-                  Describe your idea — a landing page, portfolio, dashboard, or
-                  anything else — and watch it come to life.
+                  Describe your idea, whether it&apos;s a website, app, dashboard, or anything else, and watch it come to life.
                 </p>
 
                 {authResolved &&
