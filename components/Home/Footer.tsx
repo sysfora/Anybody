@@ -1,6 +1,7 @@
 import { Mail, Github, Linkedin, Twitter } from "lucide-react";
 
 const Footer = () => {
+    const currentYear = new Date().getFullYear();
     const legalLinks = [
         { name: "Privacy Policy", href: "#" },
         { name: "Terms of Service", href: "#" },
@@ -52,7 +53,7 @@ const Footer = () => {
 
                     {/* Center - Copyright */}
                     <div className="text-xs text-black dark:text-white text-center md:text-left">
-                        © 2025 AppBuilder. All rights reserved.
+                        © {currentYear} Anybody. All rights reserved.
                     </div>
 
                     {/* Right side - Contact and Social */}

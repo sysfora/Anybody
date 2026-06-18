@@ -16,7 +16,6 @@ import { checkProjectLimit, canCreatePrivateProject } from "@/lib/subscription";
 import pb from "@/lib/pocketbase";
 import { useToast } from "@/hooks/use-toast";
 import { useProject } from "@/context/ProjectContext";
-import { PublicProjects } from "@/components/Home/PublicProjects";
 import { AttachmentPreviews, type AttachmentMeta } from "@/components/Dashboard/ChatMessages";
 import { cn } from "@/lib/utils";
 import { clearLastChatSlug } from "@/app/chat/chat-shell";
@@ -255,12 +254,12 @@ export const Content = () => {
 
                 {/* Main Heading */}
                 <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-bold tracking-tight">
-                    <span className="text-black dark:text-white">What do you want to build?</span>
+                    <span className="text-black dark:text-white">The Open-Source AI App Builder</span>
                 </h1>
 
                 {/* Description */}
                 <p className="text-sm sm:text-base md:text-lg text-foreground max-w-2xl mx-auto px-4 sm:px-0">
-                    Create apps &amp; websites by chatting with AI.
+                    Anybody can build apps and websites with AI
                 </p>
 
                 {/* Input */}
@@ -353,7 +352,6 @@ export const Home = () => {
                 <Navbar />
                 <main className="flex-1 bg-transparent sm:pb-20">
                     <Content />
-                    <PublicProjects />
                 </main>
                 <Footer />
             </div>

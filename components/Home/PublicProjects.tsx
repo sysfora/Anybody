@@ -103,11 +103,23 @@ export const PublicProjects = () => {
   };
 
   if (projects.length === 0 && !loading) {
-    return null;
+    return (
+      <section className="max-w-7xl mx-auto px-4 pb-16 lg:px-8">
+        <div className="mb-8">
+          <h2 className="text-2xl sm:text-3xl font-bold text-black dark:text-white">
+            Explore Public Projects
+          </h2>
+          <p className="text-muted-foreground mt-1">
+            Discover what others are building with Anybody.dev
+          </p>
+        </div>
+        <p className="text-muted-foreground text-sm">No public projects yet. Check back soon!</p>
+      </section>
+    );
   }
 
   return (
-    <section id="showcase" className="max-w-7xl mx-auto px-4 pb-16 lg:px-8 scroll-mt-24">
+    <section className="max-w-7xl mx-auto px-4 pb-16 lg:px-8">
       <div className="flex items-center justify-between mb-8">
         <div>
           <h2 className="text-2xl sm:text-3xl font-bold text-black dark:text-white">
