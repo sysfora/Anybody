@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
+import {
+  getCreditTierByCredits,
+  getTierPriceId,
+  type BillingCycle,
+} from "@/lib/stripe";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: "2025-11-17.clover",
@@ -9,13 +14,25 @@ import pb from "@/lib/pocketbase";
 
 export async function POST(req: NextRequest) {
   try {
-    const { priceId, email, userId, credits } = await req.json();
+    let { priceId, email, userId, credits, billingCycle } = await req.json();
 
     if (!priceId) {
       return NextResponse.json(
         { error: "Price ID is required" },
         { status: 400 }
       );
+    }
+
+    if (
+      credits &&
+      (billingCycle === "monthly" || billingCycle === "yearly") &&
+      typeof priceId === "string" &&
+      priceId.startsWith("price_credits_")
+    ) {
+      const tier = getCreditTierByCredits(Number(credits));
+      if (tier) {
+        priceId = getTierPriceId(tier, billingCycle as BillingCycle);
+      }
     }
 
     let customerId: string | undefined;
