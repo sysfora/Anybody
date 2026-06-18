@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import type { BillingCycle, CreditTier } from "@/lib/stripe";
-import { getTierDisplayPrice } from "@/lib/stripe";
+import { getTierMonthlyDisplayPrice } from "@/lib/stripe";
 
 interface CreditTierDropdownProps {
   tiers: CreditTier[];
@@ -31,7 +31,7 @@ export function CreditTierDropdown({
   disabled = false,
   showPrices = true,
 }: CreditTierDropdownProps) {
-  const displayPrice = getTierDisplayPrice(value, billingCycle);
+  const displayPrice = getTierMonthlyDisplayPrice(value, billingCycle);
   const formatCreditsLabel = (credits: number) =>
     `${credits.toLocaleString()} credits / month`;
 
@@ -79,7 +79,7 @@ export function CreditTierDropdown({
       >
         {tiers.map((tier) => {
           const isSelected = tier.credits === value.credits;
-          const tierPrice = getTierDisplayPrice(tier, billingCycle);
+          const tierPrice = getTierMonthlyDisplayPrice(tier, billingCycle);
           return (
             <DropdownMenuItem
               key={tier.credits}

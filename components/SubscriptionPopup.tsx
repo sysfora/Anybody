@@ -15,7 +15,9 @@ import { Switch } from "@/components/ui/switch";
 import {
   CREDIT_TIERS,
   DEFAULT_CREDIT_TIER,
-  getTierDisplayPrice,
+  getTierAnnualTotal,
+  getTierMonthlyDisplayPrice,
+  getTierYearlySavings,
   getTierPriceId,
   type BillingCycle,
   type CreditTier,
@@ -53,8 +55,9 @@ export function SubscriptionPopup({
   const [billingCycle, setBillingCycle] = useState<BillingCycle>("monthly");
   const [loading, setLoading] = useState(false);
 
-  const monthlyPrice = selectedTier.price;
-  const annualTotal = getTierDisplayPrice(selectedTier, "yearly");
+  const displayPrice = getTierMonthlyDisplayPrice(selectedTier, billingCycle);
+  const annualTotal = getTierAnnualTotal(selectedTier);
+  const yearlySavings = getTierYearlySavings(selectedTier);
 
   const getTitle = () => {
     if (reason === "private_project") {
@@ -139,13 +142,20 @@ export function SubscriptionPopup({
 
           <div className="space-y-1">
             <div
-              key={monthlyPrice}
-              className="flex items-baseline justify-start gap-1 animate-in fade-in duration-200"
+              key={displayPrice}
+              className="flex items-baseline justify-between gap-3 animate-in fade-in duration-200"
             >
-              <span className="text-4xl font-bold tabular-nums tracking-tight">
-                ${monthlyPrice}
-              </span>
-              <span className="text-base text-muted-foreground">/ month</span>
+              <div className="flex items-baseline gap-1">
+                <span className="text-4xl font-bold tabular-nums tracking-tight">
+                  ${displayPrice}
+                </span>
+                <span className="text-base text-muted-foreground">/ month</span>
+              </div>
+              {billingCycle === "yearly" ? (
+                <span className="shrink-0 text-sm font-medium text-primary">
+                  Save ${yearlySavings}
+                </span>
+              ) : null}
             </div>
             {billingCycle === "yearly" ? (
               <p className="text-sm text-muted-foreground animate-in fade-in duration-200">

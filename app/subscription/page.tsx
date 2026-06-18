@@ -20,7 +20,9 @@ import {
   CREDIT_TIERS,
   DEFAULT_CREDIT_TIER,
   getCreditTierByCredits,
-  getTierDisplayPrice,
+  getTierAnnualTotal,
+  getTierMonthlyDisplayPrice,
+  getTierYearlySavings,
   getTierPriceId,
   type BillingCycle,
   type CreditTier,
@@ -274,8 +276,12 @@ export default function SubscriptionPage() {
   const displayBillingCycle = hasActiveSubscription
     ? selectedBillingCycle
     : billingCycle;
-  const monthlyPrice = selectedTier.price;
-  const annualTotal = getTierDisplayPrice(selectedTier, "yearly");
+  const displayPrice = getTierMonthlyDisplayPrice(
+    selectedTier,
+    displayBillingCycle
+  );
+  const annualTotal = getTierAnnualTotal(selectedTier);
+  const yearlySavings = getTierYearlySavings(selectedTier);
   const needsBillingCycleChange =
     hasActiveSubscription && selectedBillingCycle !== currentBillingCycle;
   const isActionLoading = subscribeLoading || portalLoading;
@@ -326,15 +332,22 @@ export default function SubscriptionPage() {
 
                 <div className="space-y-1">
                   <div
-                    key={monthlyPrice}
-                    className="flex items-baseline justify-start gap-1 animate-in fade-in duration-200"
+                    key={displayPrice}
+                    className="flex items-baseline justify-between gap-3 animate-in fade-in duration-200"
                   >
-                    <span className="text-4xl font-bold tabular-nums tracking-tight">
-                      ${monthlyPrice}
-                    </span>
-                    <span className="text-base text-muted-foreground">
-                      / month
-                    </span>
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-4xl font-bold tabular-nums tracking-tight">
+                        ${displayPrice}
+                      </span>
+                      <span className="text-base text-muted-foreground">
+                        / month
+                      </span>
+                    </div>
+                    {displayBillingCycle === "yearly" ? (
+                      <span className="shrink-0 text-sm font-medium text-primary">
+                        Save ${yearlySavings}
+                      </span>
+                    ) : null}
                   </div>
                   {displayBillingCycle === "yearly" ? (
                     <p className="text-sm text-muted-foreground animate-in fade-in duration-200">

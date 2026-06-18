@@ -19,6 +19,8 @@ export type BillingCycle = "monthly" | "yearly";
 export interface CreditTier {
   credits: number;
   price: number;
+  /** Per-month price when billed annually. */
+  yearlyPrice: number;
   monthlyPriceId: string;
   yearlyPriceId: string;
 }
@@ -61,16 +63,16 @@ function resolveCreditTierPriceId(credits: number, cycle: BillingCycle): string 
 }
 
 export const CREDIT_TIERS: CreditTier[] = [
-  { credits: 500, price: 25 },
-  { credits: 1000, price: 50 },
-  { credits: 1500, price: 75 },
-  { credits: 2000, price: 100 },
-  { credits: 2500, price: 125 },
-  { credits: 3000, price: 150 },
-  { credits: 3500, price: 175 },
-  { credits: 4000, price: 200 },
-  { credits: 4500, price: 225 },
-  { credits: 5000, price: 250 },
+  { credits: 500, price: 25, yearlyPrice: 21 },
+  { credits: 1000, price: 50, yearlyPrice: 42 },
+  { credits: 1500, price: 75, yearlyPrice: 63 },
+  { credits: 2000, price: 100, yearlyPrice: 84 },
+  { credits: 2500, price: 125, yearlyPrice: 105 },
+  { credits: 3000, price: 150, yearlyPrice: 126 },
+  { credits: 3500, price: 175, yearlyPrice: 147 },
+  { credits: 4000, price: 200, yearlyPrice: 168 },
+  { credits: 4500, price: 225, yearlyPrice: 189 },
+  { credits: 5000, price: 250, yearlyPrice: 210 },
 ].map((tier) => ({
   ...tier,
   monthlyPriceId: resolveCreditTierPriceId(tier.credits, "monthly"),
@@ -79,9 +81,27 @@ export const CREDIT_TIERS: CreditTier[] = [
 
 export const DEFAULT_CREDIT_TIER = CREDIT_TIERS[1]; // 1000 credits
 
-/** Yearly price = 10× monthly (2 months free, ~17% savings). */
+/** Per-month display price for the selected billing cycle. */
+export function getTierMonthlyDisplayPrice(
+  tier: CreditTier,
+  cycle: BillingCycle
+): number {
+  return cycle === "yearly" ? tier.yearlyPrice : tier.price;
+}
+
+/** Total amount billed once per year. */
+export function getTierAnnualTotal(tier: CreditTier): number {
+  return tier.yearlyPrice * 12;
+}
+
+/** Savings vs paying the monthly rate for 12 months. */
+export function getTierYearlySavings(tier: CreditTier): number {
+  return tier.price * 12 - getTierAnnualTotal(tier);
+}
+
+/** @deprecated Prefer getTierMonthlyDisplayPrice or getTierAnnualTotal. */
 export function getTierDisplayPrice(tier: CreditTier, cycle: BillingCycle): number {
-  return cycle === "yearly" ? tier.price * 10 : tier.price;
+  return cycle === "yearly" ? getTierAnnualTotal(tier) : tier.price;
 }
 
 export function getTierPriceId(tier: CreditTier, cycle: BillingCycle): string {
