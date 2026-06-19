@@ -1,13 +1,20 @@
-import { Github, Linkedin, Twitter } from "lucide-react";
+import Link from "next/link";
+import { Github, Linkedin, Mail, Twitter } from "lucide-react";
 
 const Footer = () => {
     const currentYear = new Date().getFullYear();
     const legalLinks = [
-        { name: "Privacy Policy", href: "#" },
-        { name: "Terms of Service", href: "#" },
+        { name: "Privacy Policy", href: "/privacy" },
+        { name: "Terms of Service", href: "/terms" },
     ];
 
     const socialLinks = [
+        {
+            name: "Email",
+            href: "mailto:contact@sysfora.com",
+            icon: Mail,
+            ariaLabel: "Email us"
+        },
         {
             name: "GitHub",
             href: "https://github.com",
@@ -35,13 +42,13 @@ const Footer = () => {
                     {/* Left side - Legal links */}
                     <div className="flex items-center gap-3 md:gap-6 text-xs md:text-sm text-black dark:text-white">
                         {legalLinks.map((link) => (
-                            <a
+                            <Link
                                 key={link.name}
                                 href={link.href}
                                 className="hover:text-[#da2a1d] transition-colors"
                             >
                                 {link.name}
-                            </a>
+                            </Link>
                         ))}
                     </div>
 
@@ -50,11 +57,8 @@ const Footer = () => {
                         © {currentYear} Anybody. All rights reserved.
                     </div>
 
-                    {/* Right side - Contact and Social */}
+                    {/* Right side - Social */}
                     <div className="flex items-center gap-2 md:gap-3">
-                        <a href="#" className="text-xs md:text-sm text-black dark:text-white hover:text-[#da2a1d] transition-colors">
-                            Contact Us
-                        </a>
                         <div className="flex items-center gap-1 md:gap-2">
                             {socialLinks.map((social) => {
                                 const IconComponent = social.icon;
