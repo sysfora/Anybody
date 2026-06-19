@@ -22,7 +22,6 @@ import hashlib
 import hmac as hmac_mod
 import logging
 import os
-import re
 import time
 from pathlib import Path
 
@@ -40,7 +39,15 @@ except ImportError:
 import socketio
 from pocketbase import PocketBase
 
-from ai_service import AIAllFailedError, AINoKeysError, AIService, ContinuationParser, ModifyStreamParser, StreamParser
+from ai_service import AIAllFailedError, AINoKeysError, AIService
+from xml_response_parser import (
+    AgentStreamParser,
+    ContinuationStreamParser,
+    ModifyStreamParser,
+    REPAIR_PROMPT,
+    parse_agent_response,
+    validate_agent_response,
+)
 from pocketbase_save import (
     create_message_with_client,
     fetch_project_history,
@@ -87,9 +94,8 @@ CONTINUATION_SYSTEM = (
     "You are resuming an HTML file generation that was cut off mid-output.\n"
     "Output ONLY the remaining HTML starting from exactly where the previous "
     "response stopped — do NOT repeat any HTML that has already been generated.\n"
-    "Do NOT add a new ```html fence opener — just continue the raw HTML content.\n"
-    "When the file is complete, close the code block with ``` on its own line "
-    "and end with &&&DONE&&& on its own line."
+    "Do NOT reopen <file> or add any tags other than the closing tags below.\n"
+    "When the file is complete, close with </file> then <status>DONE</status>."
 )
 
 MAX_CONTINUATION_ATTEMPTS = 3
@@ -851,54 +857,40 @@ async def _maybe_optimize_prompt(
     return user_text
 
 
-# ---------------------------------------------------------------------------
-# Patch utilities
-# ---------------------------------------------------------------------------
+async def _maybe_repair_agent_response(
+    service: AIService, response: str, pb: PocketBase
+) -> str | None:
+    """Ask a cheap model to restore XML tags without changing code content."""
+    try:
+        parsed = parse_agent_response(response)
+        validate_agent_response(parsed)
+        return None
+    except ValueError:
+        pass
+
+    if not await AIService.fetch_keys_for_type(pb, "Optimizer"):
+        logger.debug("ws_app: response repair skipped — no Optimizer keys configured")
+        return None
+
+    try:
+        repaired = await service.complete(
+            [{"role": "user", "content": REPAIR_PROMPT.format(response=response)}],
+            "Optimizer",
+            pb,
+            max_tokens=16384,
+        )
+        repaired = repaired.strip()
+        if repaired:
+            logger.info("ws_app: attempted agent response tag repair")
+            return repaired
+    except Exception:
+        logger.warning("ws_app: agent response repair failed", exc_info=True)
+    return None
+
 
 # How many Modify-prompt patch iterations to allow in "patch mode".
 # Overridable via env var so deployments can tune cost/quality.
 MAX_PATCH_ITERATIONS = max(1, int(os.environ.get("MAX_PATCH_ITERATIONS", "5")))
-
-# Matches <<<FIND>>>…<<<REPLACE>>>…<<<END>>> blocks (greedy-safe with DOTALL)
-_PATCH_RE = re.compile(
-    r"<<<FIND>>>(.*?)<<<REPLACE>>>(.*?)<<<END>>>",
-    re.DOTALL,
-)
-
-
-def _apply_patches(html: str, response: str) -> tuple[str, int]:
-    """Apply every patch block found in *response* to *html*.
-
-    Returns ``(updated_html, number_of_patches_applied)``.
-    Patches whose FIND text cannot be located are logged and skipped.
-    """
-    count = 0
-    for m in _PATCH_RE.finditer(response):
-        find_text = m.group(1).strip()
-        replace_text = m.group(2).strip()
-        if not find_text:
-            continue
-        if find_text in html:
-            html = html.replace(find_text, replace_text, 1)
-            count += 1
-        else:
-            logger.warning(
-                "ws_app: patch FIND text not found in HTML (%.80r…)", find_text
-            )
-    return html, count
-
-
-def _extract_patch_reply(response: str) -> str:
-    """Return the closing message from a patch response.
-
-    Takes the text after the last ``<<<END>>>`` block, strips markers, and
-    returns the last non-empty line.
-    """
-    last_end = response.rfind("<<<END>>>")
-    after = response[last_end + 9 :] if last_end != -1 else response
-    after = re.sub(r"&&&(DONE|CONTINUE)&&&", "", after).strip()
-    lines = [ln.strip() for ln in after.splitlines() if ln.strip()]
-    return lines[-1] if lines else ""
 
 
 class _AssistantVisibleMessageNormalizer:
@@ -1109,7 +1101,8 @@ async def _run_ai_generation(
 
     # ── Branch A: full generation ──────────────────────────────────────────
     if not is_modification:
-        parser = StreamParser()
+        parser = AgentStreamParser()
+        raw_response_acc = [""]
         chat_messages = history + [_make_user_message(prompt)]
 
         try:
@@ -1122,6 +1115,7 @@ async def _run_ai_generation(
                 elif t == "thinking":
                     await _emit_thinking(content)
                 elif t == "text":
+                    raw_response_acc[0] += content
                     for seg_type, seg_content in parser.feed(content):
                         if seg_type == "thinking":
                             await _emit_thinking(seg_content)
@@ -1131,7 +1125,9 @@ async def _run_ai_generation(
                             await _emit_code(seg_content)
 
             for seg_type, seg_content in parser.flush():
-                if seg_type == "message":
+                if seg_type == "thinking":
+                    await _emit_thinking(seg_content)
+                elif seg_type == "message":
                     await _emit_message(seg_content)
                 elif seg_type == "code":
                     await _emit_code(seg_content)
@@ -1139,16 +1135,34 @@ async def _run_ai_generation(
         except (AINoKeysError, AIAllFailedError) as exc:
             raise RuntimeError(str(exc)) from exc
 
+        if not parser.is_done and raw_response_acc[0].strip():
+            repaired = await _maybe_repair_agent_response(
+                service, raw_response_acc[0], pb_ai
+            )
+            if repaired:
+                raw_response_acc[0] = repaired
+                structured = parse_agent_response(repaired)
+                try:
+                    validate_agent_response(structured)
+                    if structured.file["content"] and not html_acc_holder["val"]:
+                        await _emit_code(structured.file["content"])
+                    if structured.plan and not thinking_acc_holder["val"]:
+                        await _emit_thinking(structured.plan + "\n")
+                    if structured.message and not _message_acc[0]:
+                        await _emit_message(structured.message)
+                    if structured.footer:
+                        await _emit_message("\n" + structured.footer)
+                    parser.is_done = structured.status == "DONE"
+                except ValueError:
+                    logger.warning("ws_app: repaired agent response still invalid")
+
         # ── Continuation: resume if the HTML was cut off mid-generation ──────
-        # parser._state == "code" means the closing ``` was never received.
-        # We pass the partial HTML back to the AI (potentially a different,
-        # higher-context model) and ask it to continue from the exact cutoff.
-        generation_complete = parser._state == "done"
+        generation_complete = parser.is_done
         cont_attempt = 0
 
         while (
             not generation_complete
-            and parser._state == "code"
+            and getattr(parser, "in_file", parser._state == "file")
             and html_acc_holder["val"]
             and cont_attempt < MAX_CONTINUATION_ATTEMPTS
         ):
@@ -1169,7 +1183,9 @@ async def _run_ai_generation(
                 + [
                     {
                         "role": "assistant",
-                        "content": f'```html file="index.html"\n{partial_html}',
+                        "content": (
+                            f'<file name="index.html">\n{partial_html}'
+                        ),
                     },
                     {
                         "role": "user",
@@ -1177,15 +1193,15 @@ async def _run_ai_generation(
                             "Your previous response was cut off before the HTML was "
                             "complete. Please CONTINUE the HTML from exactly where you "
                             "stopped. Output ONLY the remaining HTML — do NOT repeat "
-                            "anything already written, do NOT add a new ```html fence. "
-                            "When finished, close with ``` on its own line, then "
-                            "&&&DONE&&& on its own line."
+                            "anything already written and do NOT reopen <file>. "
+                            "When finished, close with </file> then "
+                            "<status>DONE</status>."
                         ),
                     },
                 ]
             )
 
-            cont_parser = ContinuationParser()
+            cont_parser = ContinuationStreamParser()
             try:
                 async for ai_chunk in service.complete_stream(
                     cont_messages, "Agent", pb_ai, system=CONTINUATION_SYSTEM
@@ -1213,8 +1229,6 @@ async def _run_ai_generation(
                     generation_complete = True
                     break
 
-                # Not done yet — loop again (cont_parser replaces parser for
-                # the next iteration's state check).
                 parser = cont_parser  # type: ignore[assignment]
 
             except (AINoKeysError, AIAllFailedError):
