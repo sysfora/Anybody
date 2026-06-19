@@ -76,7 +76,7 @@ COPY --from=builder /install /usr/local
 COPY --from=builder /ms-playwright /ms-playwright
 
 # Copy application source.
-COPY ws_app.py pocketbase_save.py ai_service.py ./
+COPY ws_app.py pocketbase_save.py ai_service.py xml_response_parser.py ./
 COPY prompts/ ./prompts/
 
 # The server reads environment variables at runtime.
