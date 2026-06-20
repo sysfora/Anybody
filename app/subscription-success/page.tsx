@@ -67,7 +67,7 @@ function SubscriptionSuccessContent() {
           setIsUpdating(false);
           return;
         }
-        router.push("/choose-plan");
+        router.push("/subscription");
         return;
       }
       

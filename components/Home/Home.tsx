@@ -312,6 +312,7 @@ export const Content = () => {
                                     <VisibilityDropdown
                                         value={chatVisibility}
                                         onValueChange={handleVisibilityChange}
+                                        side="top"
                                     />
                                 </div>
                                 <Button

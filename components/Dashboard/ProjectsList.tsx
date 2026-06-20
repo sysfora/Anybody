@@ -1,10 +1,10 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useRef } from "react"
 import { useProjectPagination } from '@/hooks/useProjectPagination';
 import { Edit, Download, Trash2, Plus, Eye, Loader2 } from "lucide-react"
 import { clearLastChatSlug } from "@/app/chat/chat-shell";
-import { useToast } from "@/hooks/use-toast";
+import { showToast, showToastError } from "@/lib/toast";
 import { VisibilityDropdown, VisibilityOption } from "@/components/ui/visibility-dropdown";
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -35,15 +35,23 @@ type Project = {
 }
 
 export function ProjectsList() {
-    const model = pb.authStore.isValid ? (pb.authStore.model as { id?: string }) : null;
-    const userId = model?.id;
+    const [mounted, setMounted] = useState(false);
+    const [isLoggedIn, setIsLoggedIn] = useState(false);
+    const [userId, setUserId] = useState<string | undefined>(undefined);
+
+    useEffect(() => {
+        setMounted(true);
+        if (pb.authStore.isValid) {
+            setIsLoggedIn(true);
+            setUserId((pb.authStore.model as { id?: string } | null)?.id);
+        }
+    }, []);
 
     const { items: projects, loading, hasMore, fetchMore } = useProjectPagination<Project>({
         apiUrl: userId ? `/api/projects?userId=${encodeURIComponent(userId)}` : '',
         initialLimit: 12
     });
 
-    const { toast } = useToast();
     const [updatingVisibilityId, setUpdatingVisibilityId] = useState<string | null>(null);
     const [deletingId, setDeletingId] = useState<string | null>(null);
     const [showSubscriptionPopup, setShowSubscriptionPopup] = useState(false);
@@ -76,7 +84,13 @@ export function ProjectsList() {
     const [displayProjects, setDisplayProjects] = useState<Project[]>([]);
     
     useEffect(() => {
-        setDisplayProjects(projects);
+        setDisplayProjects((prev) => {
+            const visibilityById = new Map(prev.map((p) => [p.id, p.visibility]));
+            return projects.map((p) => ({
+                ...p,
+                visibility: visibilityById.get(p.id) ?? p.visibility,
+            }));
+        });
     }, [projects]);
 
     const isProjectBusy = (project: Project): boolean => {
@@ -151,24 +165,16 @@ export function ProjectsList() {
                 setDisplayProjects(prev => prev.map(p => 
                     p.id === project.id ? { ...p, visibility: newVisibility } : p
                 ));
-                toast({
-                    title: "Success",
+                showToast({
+                    title: "Visibility updated",
                     description: `Project is now ${newVisibility}.`,
                 });
             } else {
-                toast({
-                    title: "Update Failed",
-                    description: data.error || "Failed to update visibility.",
-                    variant: "destructive",
-                });
+                showToastError(data.error, "Failed to update visibility.");
             }
         } catch (error) {
             console.error("Error updating visibility:", error);
-            toast({
-                title: "Error",
-                description: "An unexpected error occurred.",
-                variant: "destructive",
-            });
+            showToastError(error, "An unexpected error occurred.");
         } finally {
             setUpdatingVisibilityId(null);
         }
@@ -250,7 +256,28 @@ export function ProjectsList() {
         })
     }
 
-    if (!pb.authStore.isValid) {
+    if (!mounted) {
+        return (
+            <div className="space-y-4">
+                <div className="flex justify-end">
+                    <div className="h-8 w-24 rounded-md bg-muted animate-pulse" />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                    {Array.from({ length: 4 }).map((_, i) => (
+                        <div key={i} className="rounded-xl border border-border bg-card overflow-hidden">
+                            <div className="aspect-video bg-muted animate-pulse" />
+                            <div className="p-4 space-y-3">
+                                <div className="h-4 w-2/3 rounded bg-muted animate-pulse" />
+                                <div className="h-3 w-1/3 rounded bg-muted animate-pulse" />
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+    }
+
+    if (!isLoggedIn || !userId) {
         return (
             <div className="rounded-lg border border-border bg-card p-8 text-center">
                 <p className="text-muted-foreground text-sm sm:text-base mb-4">
@@ -338,6 +365,7 @@ export function ProjectsList() {
                                                 value={project.visibility as VisibilityOption}
                                                 onValueChange={(val) => handleVisibilityChange(project, val)}
                                                 disabled={updatingVisibilityId === project.id}
+                                                side="bottom"
                                                 className="bg-background/80 backdrop-blur-sm border shadow-sm hover:bg-background h-8 transition-all"
                                             />
                                         </div>

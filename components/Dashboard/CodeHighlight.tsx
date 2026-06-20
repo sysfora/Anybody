@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useTheme } from "next-themes"
+import { useTheme } from "@teispace/next-themes"
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneLight, vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 

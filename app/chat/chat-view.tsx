@@ -41,7 +41,7 @@ import pb from '@/lib/pocketbase';
 import { SUBSCRIPTION_RESUME_KEY, SubscriptionPopup, type SubscriptionResumeData } from '@/components/SubscriptionPopup';
 import { AutoReloadDialog } from '@/components/AutoReloadDialog';
 import { clearLastChatSlug } from '@/app/chat/chat-shell';
-import { toast } from 'sonner';
+import { toast, showToast, showToastError } from '@/lib/toast';
 
 /** sessionStorage helpers for per-project prompt persistence */
 const promptKey = (slug: string) => `chat_prompt_${encodeURIComponent(slug)}`;
@@ -1202,10 +1202,12 @@ export default function ChatView({
 
 
   const handleVisibilityChange = async (newVisibility: VisibilityOption) => {
-    if (newVisibility === "private") {
-      const userId = pb.authStore.record?.id;
-      if (!userId) return;
+    if (newVisibility === chatVisibility) return;
 
+    const userId = pb.authStore.model?.id;
+    if (!userId) return;
+
+    if (newVisibility === "private") {
       const res = await fetch("/api/subscription/can-create-private", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1218,7 +1220,49 @@ export default function ChatView({
         return;
       }
     }
+
+    const previousVisibility = chatVisibility;
     setChatVisibility(newVisibility);
+
+    const projectId = projectPbIdRef.current;
+    const username = (pb.authStore.model as { username?: string } | null)?.username;
+    const resolvedName =
+      projectNameRef.current?.trim() ||
+      projectName?.trim() ||
+      (projectIdFromUrl ? decodeURIComponent(projectIdFromUrl.trim()) : '');
+
+    if (!projectId || !username || !resolvedName) {
+      showToast({
+        title: "Visibility updated",
+        description: `New projects will be created as ${newVisibility}.`,
+      });
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/projects/update-visibility", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: `${username}/${resolvedName}`,
+          visibility: newVisibility,
+          userId,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        setChatVisibility(previousVisibility);
+        showToastError(data.error, "Failed to update visibility.");
+      } else {
+        showToast({
+          title: "Visibility updated",
+          description: `Project is now ${newVisibility}.`,
+        });
+      }
+    } catch {
+      setChatVisibility(previousVisibility);
+      showToastError(null, "Failed to update visibility.");
+    }
   };
 
   const hasProject = !!projectName?.trim();
@@ -1376,6 +1420,7 @@ export default function ChatView({
                       value={chatVisibility}
                       onValueChange={handleVisibilityChange}
                       disabled={busy || !wsConnected}
+                      side="top"
                     />
                   </div>
                   {busy ? (

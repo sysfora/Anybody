@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import pb from '@/lib/pocketbase';
 import { getEffectiveUserId } from '@/lib/server-utils';
+import { escapePbFilterString } from '@/lib/session-user';
 import Stripe from 'stripe';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
@@ -82,10 +83,11 @@ export async function POST(request: NextRequest) {
     }
 
     const [identifier, project_name] = parts;
+    const safeIdentifier = escapePbFilterString(identifier);
 
     // Try to find user by username first, then by userId if that fails
     let users = await pb.collection('users').getList(1, 1, {
-      filter: `username = "${identifier}"`,
+      filter: `username = "${safeIdentifier}"`,
     });
 
     // If not found by username, try as userId
@@ -115,9 +117,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const safeProjectName = escapePbFilterString(project_name);
+    const safeProjectOwnerId = escapePbFilterString(projectOwnerId);
+
     // Find existing project
     const projects = await pb.collection('projects').getList(1, 1, {
-      filter: `name="${project_name}" && user="${projectOwnerId}"`,
+      filter: `name="${safeProjectName}" && user="${safeProjectOwnerId}"`,
     });
 
     if (projects.items.length === 0) {

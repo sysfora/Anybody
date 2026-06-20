@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useTheme } from "next-themes";
+import { useTheme } from "@teispace/next-themes";
 import { useEffect, useState } from "react";
 import BackgroundBlack from "@/assets/BackgroundBlack.png";
 import BackgroundWhite from "@/assets/BackgroundWhite.png";

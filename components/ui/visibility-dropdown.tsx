@@ -19,15 +19,18 @@ interface VisibilityDropdownProps {
   onValueChange: (value: VisibilityOption) => void
   className?: string
   disabled?: boolean
+  side?: "top" | "bottom"
 }
 
 export function VisibilityDropdown({ 
   value, 
   onValueChange, 
   className,
-  disabled = false
+  disabled = false,
+  side = "bottom",
 }: VisibilityDropdownProps) {
   const [mounted, setMounted] = useState(false)
+  const [open, setOpen] = useState(false)
 
   useEffect(() => {
     setMounted(true)
@@ -49,6 +52,13 @@ export function VisibilityDropdown({
   ]
 
   const selectedOption = options.find(option => option.value === value)
+
+  const handleSelect = (optionValue: VisibilityOption) => {
+    setOpen(false)
+    if (optionValue !== value) {
+      onValueChange(optionValue)
+    }
+  }
 
   if (!mounted) {
     return (
@@ -74,7 +84,7 @@ export function VisibilityDropdown({
   }
 
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen} modal={false}>
       <DropdownMenuTrigger asChild disabled={disabled}>
         <Button
           variant="ghost"
@@ -95,13 +105,22 @@ export function VisibilityDropdown({
           <ChevronDown className="h-3 w-3" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="top" align="start" sideOffset={6} className="w-48 bg-background border border-border text-left">
+      <DropdownMenuContent
+        side={side}
+        align="start"
+        sideOffset={2}
+        className="w-48 bg-background border border-border text-left"
+        onCloseAutoFocus={(e) => e.preventDefault()}
+      >
         {options.map((option) => {
           const Icon = option.icon
           return (
             <DropdownMenuItem
               key={option.value}
-              onClick={() => onValueChange(option.value)}
+              onSelect={(e) => {
+                e.preventDefault()
+                handleSelect(option.value)
+              }}
               className="flex items-center gap-2 px-3 py-2 cursor-pointer text-left"
             >
               <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />

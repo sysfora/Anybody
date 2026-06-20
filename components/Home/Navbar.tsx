@@ -8,7 +8,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Menu, X } from "lucide-react";
 import logoWhite from "@/assets/LogoWhite.png";
 import logoBlack from "@/assets/LogoBlack.png";
-import { useTheme } from "next-themes";
+import { useTheme } from "@teispace/next-themes";
 import pb from "@/lib/pocketbase";
 
 export function Navbar() {
@@ -32,7 +32,6 @@ export function Navbar() {
     const navLinks = [
         { name: "Home", href: "/" },
         { name: "Showcase", href: "/showcase" },
-        { name: "Pricing", href: "/choose-plan" },
         { name: "Our Story", href: "/our-story" },
     ];
 
