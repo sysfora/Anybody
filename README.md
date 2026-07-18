@@ -47,14 +47,14 @@
 
 ### Why This Project?
 
-- ✅ **Free and Open Source** — Licensed under AGPL-3.0
-- ✅ **Real-time Generation** — WebSocket-driven status and code streaming as the app is built
-- ✅ **File Attachments** — Upload up to 5 files (10MB each) for context and references
-- ✅ **Project Control** — Start, cancel, and resume generation; auto-reconnect on disconnect
-- ✅ **Code Preview** — Character-by-character file streaming with auto-scroll
-- ✅ **Modern Stack** — Next.js 16, React 19, TypeScript, Tailwind CSS
-- ✅ **Responsive** — Works on desktop and mobile
-- ✅ **Actively Maintained** — Regular updates and community support
+- **Free and Open Source** — Licensed under AGPL-3.0
+- **Real-time Generation** — WebSocket-driven status and code streaming as the app is built
+- **File Attachments** — Upload up to 5 files (10MB each) for context and references
+- **Project Control** — Start, cancel, and resume generation; auto-reconnect on disconnect
+- **Code Preview** — Character-by-character file streaming with auto-scroll
+- **Modern Stack** — Next.js 16, React 19, TypeScript, Tailwind CSS
+- **Responsive** — Works on desktop and mobile
+- **Actively Maintained** — Regular updates and community support
 
 ---
 
@@ -538,7 +538,7 @@ A: Open a GitHub issue or contact the maintainers directly.
 
 ### Version History
 
-**v0.1.0** (Current)
+**v1.0** (Current)
 - Real-time generation with WebSocket
 - File upload and code streaming
 - Project start, cancel, resume, and reconnection
