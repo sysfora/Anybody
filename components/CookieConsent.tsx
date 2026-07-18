@@ -42,9 +42,8 @@ export function CookieConsent() {
     >
       <div className="mx-auto flex max-w-3xl flex-col gap-4 rounded-xl border border-border bg-white/95 p-4 shadow-lg backdrop-blur-md dark:bg-black/95 sm:flex-row sm:items-center sm:justify-between sm:p-5">
         <p className="text-sm leading-relaxed text-black dark:text-white">
-          We use cookies for essential site features and, with your permission,
-          analytics (Google Analytics and Microsoft Clarity) to improve Anybody.
-          See our{" "}
+          We use cookies to ensure that we give you the best experience on our
+          website. Read{" "}
           <Link
             href="/privacy"
             className="underline underline-offset-2 hover:text-[#da2a1d]"
