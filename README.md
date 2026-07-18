@@ -595,22 +595,13 @@ Thanks to the open-source projects and communities that make this possible:
 
 <img src="assets/SysforaLogo.png" alt="Sysfora Logo" width="200" style="border-radius: 999px; display: block; margin: 0 auto;" />
 
-**[Sysfora](https://sysfora.com)** builds high-quality, open-source software for developers and teams.
+**[Sysfora](https://sysfora.com)** builds high-quality, open-source software for the betterment of the world.
 
 </div>
 
 ### Our Mission
 
-To create accessible, powerful tools that help people turn ideas into working software.
-
-### This Project
-
-**Anybody** is developed and maintained by Sysfora. We focus on:
-
-- 🔓 **Open Source** — Transparent, community-friendly development
-- 🚀 **Modern Stack** — Next.js, React, TypeScript
-- 🌐 **Real-time** — Live code streaming and status updates
-- 🛠 **Developer Experience** — Clear setup and documentation
+We are on a mission to build powerful AI systems that think, learn, and evolve like humans do, with nuance, memory, and imagination.
 
 ### Get in Touch
 
