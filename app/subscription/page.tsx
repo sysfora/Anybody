@@ -85,11 +85,6 @@ export default function SubscriptionPage() {
         if (profileRes.ok) {
           userData = await profileRes.json();
           setUser(userData);
-
-          const tierFromCredits = getCreditTierByCredits(userData?.credits ?? 0);
-          if (tierFromCredits) {
-            setSelectedTier(tierFromCredits);
-          }
         }
 
         const statusResponse = await fetch("/api/subscription/status", {
@@ -109,14 +104,19 @@ export default function SubscriptionPage() {
             setSelectedBillingCycle(status.billingCycle);
           }
 
-          if (status.subscriptionCredits) {
+          // Only mirror an existing paid plan. New / free users keep the 500 default.
+          if (status.hasActiveSubscription && status.subscriptionCredits) {
             const tierFromSubscription = getCreditTierByCredits(
               status.subscriptionCredits
             );
             if (tierFromSubscription) {
               setSelectedTier(tierFromSubscription);
             }
+          } else {
+            setSelectedTier(DEFAULT_CREDIT_TIER);
           }
+        } else {
+          setSelectedTier(DEFAULT_CREDIT_TIER);
         }
       } catch (error) {
         console.error("Error fetching data:", error);

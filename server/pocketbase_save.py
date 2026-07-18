@@ -294,8 +294,15 @@ async def patch_project_record_with_client(
     return False
 
 
-async def fetch_project_html(pb: PocketBase, project_id: str) -> str:
-    """Return the current ``html`` field value for a project, or empty string."""
+async def fetch_project_html(pb: PocketBase, project_id: str) -> str | None:
+    """Return the current ``html`` field value for a project.
+
+    Returns ``None`` (distinct from ``""``) when the fetch itself fails, so
+    callers can tell a transient read error apart from "no HTML yet". This
+    matters because a project with existing HTML that we simply failed to
+    read must not be mistaken for a brand-new project — doing so would
+    trigger a full regeneration that discards the user's existing work.
+    """
     if not project_id:
         return ""
 
@@ -307,7 +314,7 @@ async def fetch_project_html(pb: PocketBase, project_id: str) -> str:
         return await asyncio.to_thread(_fetch)
     except Exception:
         logger.exception("pocketbase: fetch html failed project_id=%s", project_id)
-    return ""
+    return None
 
 
 async def fetch_project_history(

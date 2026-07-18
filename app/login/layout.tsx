@@ -1,18 +1,22 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Login - Anybody.dev",
-  description: "Login to your Anybody.dev account to continue building AI apps faster.",
+  title: "Login",
+  description: "Log in to your Anybody account to continue building AI apps faster.",
   keywords: ["login", "authentication", "AI app builder", "Anybody.dev"],
+  alternates: {
+    canonical: "/login",
+  },
   openGraph: {
-    title: "Login - Anybody.dev",
-    description: "Login to your Anybody.dev account to continue building AI apps faster.",
+    title: "Login | Anybody",
+    description: "Log in to your Anybody account to continue building AI apps faster.",
     type: "website",
+    url: "/login",
   },
   twitter: {
     card: "summary",
-    title: "Login - Anybody.dev",
-    description: "Login to your Anybody.dev account to continue building AI apps faster.",
+    title: "Login | Anybody",
+    description: "Log in to your Anybody account to continue building AI apps faster.",
   },
 };
 

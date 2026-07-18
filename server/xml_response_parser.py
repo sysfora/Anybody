@@ -341,6 +341,16 @@ class ModifyStreamParser(_XmlSectionStreamParserBase):
         self.full_html: str = ""
         self.wants_continuation = False
 
+    @property
+    def in_file(self) -> bool:
+        return self._state == "file"
+
+    @property
+    def partial_file_content(self) -> str:
+        """Accumulated ``<file>`` content, including when ``</file>`` was
+        never seen (i.e. the response was cut off mid-file)."""
+        return self._file_acc
+
     def feed(self, text: str) -> list[tuple[SegmentType, str]]:
         if self._state == "patch":
             self._patch_buf += text

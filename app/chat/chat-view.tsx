@@ -37,6 +37,8 @@ import { VisibilityDropdown, type VisibilityOption } from '@/components/ui/visib
 import { cn } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
 import { getSocket } from '@/lib/socket';
+import { animateHtmlDiff, prefersReducedMotion } from '@/lib/codeDiffAnimator';
+import { unlockAudio, playGenerationCompleteSound } from '@/lib/sound';
 import pb from '@/lib/pocketbase';
 import { SUBSCRIPTION_RESUME_KEY, SubscriptionPopup, type SubscriptionResumeData } from '@/components/SubscriptionPopup';
 import { AutoReloadDialog } from '@/components/AutoReloadDialog';
@@ -72,6 +74,14 @@ const deviceSizes = {
 
 /** Pixels from bottom to treat as "at end" for auto-scroll resume. */
 const SCROLL_END_THRESHOLD_PX = 80;
+
+/**
+ * While a generation is in flight, the preview iframe rebuilds/reloads from
+ * a fresh blob URL on every htmlSource change, which happens dozens of
+ * times a second during streaming. Cap it to once per this many ms so the
+ * preview doesn't flicker/reload constantly mid-stream.
+ */
+const PREVIEW_THROTTLE_MS = 5000;
 
 function isNearScrollBottom(el: HTMLElement) {
   const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
@@ -133,6 +143,10 @@ export default function ChatView({
   const chatStickBottomRef = useRef(true);
   const codeStickBottomRef = useRef(true);
   const previewObjectUrlRef = useRef<string | null>(null);
+  // Throttle bookkeeping for the preview-rebuild effect below: timestamp of
+  // the last actual preview flush, and the pending trailing-flush timer.
+  const lastPreviewFlushAtRef = useRef(0);
+  const previewThrottleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const submitInFlightRef = useRef(false);
   const pendingAssistantIdRef = useRef<string | null>(null);
   const pendingRequestIdRef = useRef<string | null>(null);
@@ -149,6 +163,18 @@ export default function ChatView({
   // True once the first code_chunk for the current generation has arrived.
   // Used to wipe old HTML exactly once so the new code replaces it cleanly.
   const firstCodeChunkRef = useRef(false);
+  // True when the current/most recent turn is editing an existing project
+  // (2nd+ prompt) rather than generating a brand-new one. Drives the
+  // diff-typewriter animation in onGenerationDone and suppresses the raw
+  // live code_chunk re-render during modify turns (see onCodeChunk).
+  const isModifyTurnRef = useRef(false);
+  // Snapshot of htmlSource right before a modify-turn submit — the "before"
+  // side of the diff animation once the turn completes.
+  const preEditHtmlRef = useRef<string | null>(null);
+  // Bumped on every new submit / stop / new-project so a still-running diff
+  // animation from a stale turn can detect it's been superseded and stop
+  // touching shared state.
+  const animationTokenRef = useRef(0);
 
   const [projectLoadStatus, setProjectLoadStatus] = useState<string | null>(
     null,
@@ -287,6 +313,14 @@ export default function ChatView({
     codeStickBottomRef.current = isNearScrollBottom(el);
   }, []);
 
+  /** Scroll the code panel so the given 1-based line is centered in view. */
+  const scrollCodeToLine = useCallback((lineNumber: number) => {
+    const container = codeScrollRef.current;
+    if (!container) return;
+    const lineEl = container.querySelector(`[data-line-number="${lineNumber}"]`);
+    lineEl?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, []);
+
   useLayoutEffect(() => {
     const el = chatContainerRef.current;
     if (!el || !chatStickBottomRef.current) return;
@@ -330,21 +364,29 @@ export default function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectIdFromUrl]);
 
-  // On mount, check if there's a subscription resume to auto-submit.
+  // On mount, restore a prompt saved before Stripe checkout (upgrade mid-prompt).
   useEffect(() => {
-    if (projectIdFromUrl?.trim()) return;
-
     try {
       const raw = localStorage.getItem(SUBSCRIPTION_RESUME_KEY);
-      if (raw) {
-        const data = JSON.parse(raw) as SubscriptionResumeData;
-        if (data.returnTo === '/chat' && data.pendingPrompt?.trim()) {
-          setChatInput(data.pendingPrompt.trim());
-          setChatVisibility((data.pendingVisibility as VisibilityOption) ?? 'public');
-          setShouldAutoSubmit(true);
-          localStorage.removeItem(SUBSCRIPTION_RESUME_KEY);
-        }
+      if (!raw) return;
+
+      const data = JSON.parse(raw) as SubscriptionResumeData;
+      const returnTo = data.returnTo?.trim() || "";
+      const isChatReturn =
+        returnTo === "/chat" ||
+        returnTo.startsWith("/chat/") ||
+        returnTo.startsWith("/chat?");
+
+      if (!isChatReturn) return;
+
+      // If we landed on a different chat URL than saved, still restore here
+      // when the success page already navigated us to this path.
+      if (data.pendingPrompt?.trim()) {
+        setChatInput(data.pendingPrompt.trim());
+        setChatVisibility((data.pendingVisibility as VisibilityOption) ?? "public");
+        setShouldAutoSubmit(true);
       }
+      localStorage.removeItem(SUBSCRIPTION_RESUME_KEY);
     } catch {
       // ignore
     }
@@ -388,7 +430,7 @@ export default function ChatView({
     }, []);
 
   const applyProjectLoad = useCallback(
-    (data: ProjectLoadPayload, options?: { force?: boolean }) => {
+    (data: ProjectLoadPayload, options?: { force?: boolean; skipHtml?: boolean }) => {
       if (data.project?.id) {
         projectPbIdRef.current = data.project.id;
       }
@@ -413,7 +455,7 @@ export default function ChatView({
             attachments: m.attachments,
           })),
         );
-        if (typeof data.html === 'string') {
+        if (typeof data.html === 'string' && !options?.skipHtml) {
           htmlSourceRef.current = data.html;
           setHtmlSource(data.html);
         }
@@ -514,36 +556,75 @@ export default function ChatView({
     applyProjectLoad,
   ]);
 
+  // Rebuild the preview iframe's blob URL from the latest htmlSource. During
+  // an active generation this is throttled to PREVIEW_THROTTLE_MS so the
+  // dozens of chunk-driven htmlSource updates per second don't reload the
+  // iframe constantly; outside of generation (load, diff-typewriter
+  // animation, etc.) every change is reflected immediately.
   useEffect(() => {
-    if (previewObjectUrlRef.current) {
-      URL.revokeObjectURL(previewObjectUrlRef.current);
-      previewObjectUrlRef.current = null;
+    const isGenerating =
+      ctxProjectStatus === 'generating' || projectLoadStatus === 'generating';
+
+    if (previewThrottleTimeoutRef.current) {
+      clearTimeout(previewThrottleTimeoutRef.current);
+      previewThrottleTimeoutRef.current = null;
     }
-    if (!htmlSource.trim()) {
-      setPreviewUrl(null);
+
+    const flush = () => {
+      lastPreviewFlushAtRef.current = Date.now();
+      if (previewObjectUrlRef.current) {
+        URL.revokeObjectURL(previewObjectUrlRef.current);
+        previewObjectUrlRef.current = null;
+      }
+      const currentHtml = htmlSourceRef.current;
+      if (!currentHtml.trim()) {
+        setPreviewUrl(null);
+        return;
+      }
+      // Inject forced light-mode isolation. We surgically inject into the head if it exists to maintain valid HTML structure.
+      const isolationSnippet = `<meta name="color-scheme" content="light"><style>:root { color-scheme: light !important; } body { background-color: white; color: black; margin: 0; min-height: 100vh; }</style>`;
+      let isolatedHtml = currentHtml;
+      if (currentHtml.includes('<head>')) {
+        isolatedHtml = currentHtml.replace('<head>', '<head>' + isolationSnippet);
+      } else if (currentHtml.includes('<html>')) {
+        isolatedHtml = currentHtml.replace('<html>', '<html><head>' + isolationSnippet + '</head>');
+      } else {
+        isolatedHtml = isolationSnippet + currentHtml;
+      }
+      const blob = new Blob([isolatedHtml], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      previewObjectUrlRef.current = url;
+      setPreviewUrl(url);
+    };
+
+    if (!isGenerating) {
+      flush();
       return;
     }
-    // Inject forced light-mode isolation. We surgically inject into the head if it exists to maintain valid HTML structure.
-    const isolationSnippet = `<meta name="color-scheme" content="light"><style>:root { color-scheme: light !important; } body { background-color: white; color: black; margin: 0; min-height: 100vh; }</style>`;
-    let isolatedHtml = htmlSource;
-    if (htmlSource.includes('<head>')) {
-      isolatedHtml = htmlSource.replace('<head>', '<head>' + isolationSnippet);
-    } else if (htmlSource.includes('<html>')) {
-        isolatedHtml = htmlSource.replace('<html>', '<html><head>' + isolationSnippet + '</head>');
+
+    const elapsed = Date.now() - lastPreviewFlushAtRef.current;
+    if (elapsed >= PREVIEW_THROTTLE_MS) {
+      flush();
     } else {
-      isolatedHtml = isolationSnippet + htmlSource;
+      previewThrottleTimeoutRef.current = setTimeout(flush, PREVIEW_THROTTLE_MS - elapsed);
     }
-    const blob = new Blob([isolatedHtml], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    previewObjectUrlRef.current = url;
-    setPreviewUrl(url);
+  }, [htmlSource, setPreviewUrl, ctxProjectStatus, projectLoadStatus]);
+
+  // Revoke the last live blob URL and any pending throttled flush only on
+  // true unmount — per-run cleanup would revoke a URL that's still on
+  // screen while a throttled update is pending.
+  useEffect(() => {
     return () => {
+      if (previewThrottleTimeoutRef.current) {
+        clearTimeout(previewThrottleTimeoutRef.current);
+        previewThrottleTimeoutRef.current = null;
+      }
       if (previewObjectUrlRef.current) {
         URL.revokeObjectURL(previewObjectUrlRef.current);
         previewObjectUrlRef.current = null;
       }
     };
-  }, [htmlSource, setPreviewUrl]);
+  }, []);
 
   useEffect(() => {
     const titleName = projectName?.trim();
@@ -677,6 +758,14 @@ export default function ChatView({
     const onCodeChunk = (payload: { request_id: string; chunk: string }) => {
       if (payload.request_id !== pendingRequestIdRef.current) return;
       clearGenerationWatchdog();
+      if (isModifyTurnRef.current) {
+        // Modify turns don't render the raw re-streamed file live — it's
+        // the *entire* file re-sent quickly, not a meaningful "typing"
+        // signal. The code panel stays on the pre-edit HTML until the
+        // diff-typewriter animation runs in onGenerationDone, once the
+        // real before/after difference is known.
+        return;
+      }
       setHtmlSource((prev) => {
         // First code chunk clears the previous HTML so new output starts fresh.
         const base = firstCodeChunkRef.current ? prev : '';
@@ -713,12 +802,52 @@ export default function ChatView({
       if (payload.request_id !== pendingRequestIdRef.current) return;
       if (!pendingAssistantIdRef.current) return;
       finalizePending();
-      setIframeKey((k) => k + 1);
-      setViewMode('preview');
+      playGenerationCompleteSound();
+
+      const myToken = animationTokenRef.current;
+      const wasModifyTurn = isModifyTurnRef.current;
+      const preEditHtml = preEditHtmlRef.current;
+
+      if (!wasModifyTurn) {
+        // First-prompt behavior, unchanged: the file already streamed in
+        // live via code_chunk, so flip to Preview immediately.
+        setIframeKey((k) => k + 1);
+        setViewMode('preview');
+      }
+
       void (async () => {
         const data = await fetchProjectLoadData();
         if (!data || data === 'not-found') return;
-        applyProjectLoad(data, { force: true });
+
+        const finalHtml = typeof data.html === 'string' ? data.html : null;
+        const stillCurrent = () => animationTokenRef.current === myToken;
+        const shouldAnimate =
+          wasModifyTurn &&
+          finalHtml !== null &&
+          preEditHtml !== null &&
+          preEditHtml !== finalHtml &&
+          !prefersReducedMotion() &&
+          stillCurrent();
+
+        applyProjectLoad(data, { force: true, skipHtml: shouldAnimate });
+
+        if (shouldAnimate && finalHtml !== null) {
+          const previousStickBottom = codeStickBottomRef.current;
+          codeStickBottomRef.current = false;
+          await animateHtmlDiff({
+            before: preEditHtml,
+            after: finalHtml,
+            isCancelled: () => !stillCurrent(),
+            onUpdate: (text) => setHtmlSource(text),
+            onScrollToLine: scrollCodeToLine,
+          });
+          codeStickBottomRef.current = previousStickBottom;
+        }
+
+        if (wasModifyTurn && stillCurrent()) {
+          setIframeKey((k) => k + 1);
+          setViewMode('preview');
+        }
       })();
     };
 
@@ -784,6 +913,8 @@ export default function ChatView({
     const aid = pendingAssistantIdRef.current;
     if (!req || !aid) return;
     clearGenerationWatchdog();
+    // Cancel any in-flight diff animation for this turn.
+    animationTokenRef.current += 1;
     getSocket().emit('stop_generation', { request_id: req });
     setChatMessages((prev) =>
       prev.map((m) =>
@@ -808,6 +939,10 @@ export default function ChatView({
       getSocket().emit('stop_generation', { request_id: req });
     }
     clearGenerationWatchdog();
+    // Cancel any in-flight diff animation from the project being left behind.
+    animationTokenRef.current += 1;
+    isModifyTurnRef.current = false;
+    preEditHtmlRef.current = null;
     pendingAssistantIdRef.current = null;
     pendingRequestIdRef.current = null;
     // Clear all project-specific refs so stale data can never bleed into the new session.
@@ -845,6 +980,11 @@ export default function ChatView({
     if (!wsConnectedRef.current) return;
     if (busy) return;
     if (submitInFlightRef.current) return;
+
+    // Unlock the shared AudioContext now, synchronously inside this
+    // user-gesture-triggered handler, so the completion chime can play
+    // later (once generation finishes) without hitting autoplay blocks.
+    unlockAudio();
 
     submitInFlightRef.current = true;
     setIsSubmitting(true);
@@ -964,6 +1104,18 @@ export default function ChatView({
       const t = Date.now();
       const pendingId = `pending-${t}`;
       const requestId = `req-${t}`;
+
+      // Snapshot pre-edit state before anything else changes: a non-empty
+      // htmlSource means this is a modify turn (2nd+ prompt) editing an
+      // existing project, which drives the diff-typewriter animation once
+      // generation finishes. Bumping the token here cancels any animation
+      // still playing from a previous turn.
+      animationTokenRef.current += 1;
+      isModifyTurnRef.current = htmlSourceRef.current.trim().length > 0;
+      preEditHtmlRef.current = htmlSourceRef.current;
+      // Let this turn's first preview update land immediately rather than
+      // inheriting the throttle window from whatever the last turn did.
+      lastPreviewFlushAtRef.current = 0;
 
       pendingAssistantIdRef.current = pendingId;
       pendingRequestIdRef.current = requestId;
@@ -1589,8 +1741,12 @@ export default function ChatView({
         open={showSubscriptionPopup}
         onOpenChange={setShowSubscriptionPopup}
         reason={subscriptionReason}
-        returnTo={`/chat/${projectIdFromUrl ?? ''}`}
-        pendingPrompt={blockedPromptRef.current ?? chatInput ?? ''}
+        returnTo={
+          projectIdFromUrl?.trim()
+            ? `/chat/${encodeURIComponent(decodeURIComponent(projectIdFromUrl.trim()))}`
+            : "/chat"
+        }
+        pendingPrompt={blockedPromptRef.current ?? chatInput ?? ""}
         pendingVisibility={chatVisibility}
       />
       <AutoReloadDialog

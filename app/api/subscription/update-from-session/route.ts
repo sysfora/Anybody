@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
 import pb from '@/lib/pocketbase';
+import {
+  DEFAULT_CREDIT_AMOUNT,
+  getBillingCycleForPriceId,
+  getCreditsForPriceId,
+} from '@/lib/stripe';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: '2025-11-17.clover',
@@ -105,6 +110,7 @@ export async function POST(request: NextRequest) {
     // Get subscription details
     let subscriptionId: string | null = null;
     let billingCycle: 'monthly' | 'yearly' | null = null;
+    let purchasedCredits: number = DEFAULT_CREDIT_AMOUNT;
 
     if (session.subscription) {
       try {
@@ -114,11 +120,15 @@ export async function POST(request: NextRequest) {
 
         subscriptionId = subscription.id;
         const priceId = subscription.items.data[0]?.price.id;
-        
-        const isMonthly = priceId === process.env.NEXT_PUBLIC_STRIPE_MONTHLY_PRICE_ID;
-        const isYearly = priceId === process.env.NEXT_PUBLIC_STRIPE_YEARLY_PRICE_ID;
-        
-        billingCycle = isYearly ? 'yearly' : isMonthly ? 'monthly' : null;
+        billingCycle = priceId ? getBillingCycleForPriceId(priceId) : null;
+        purchasedCredits =
+          getCreditsForPriceId(priceId ?? '') ??
+          (session.metadata?.credits
+            ? parseInt(String(session.metadata.credits), 10)
+            : DEFAULT_CREDIT_AMOUNT);
+        if (!Number.isFinite(purchasedCredits) || purchasedCredits <= 0) {
+          purchasedCredits = DEFAULT_CREDIT_AMOUNT;
+        }
       } catch (error) {
         console.warn('Could not retrieve subscription details:', error);
         // Continue without subscription details - webhook will handle it
@@ -180,14 +190,15 @@ export async function POST(request: NextRequest) {
       const wasPro = currentUser.plan === 'pro' || currentUser.plan === 'Pro';
       const isFirstTimePro = !wasPro;
       
-      const updateData: { stripe_id: string; plan: string; credits?: number } = {
+      const updateData: { stripe_id: string; plan: string; credits?: number; credits_used?: number } = {
         stripe_id: customerId,
         plan: 'pro',
       };
 
-      // If first time Pro subscription, set credits to 1000
+      // First-time Pro: grant credits for the purchased tier (default 500).
       if (isFirstTimePro) {
-        updateData.credits = 1000;
+        updateData.credits = purchasedCredits;
+        updateData.credits_used = 0;
       }
 
       await pb.collection('users').update(effectiveUserId, updateData);

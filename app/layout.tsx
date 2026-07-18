@@ -4,6 +4,15 @@ import { ThemeProvider } from "@teispace/next-themes";
 import { getTheme } from "@teispace/next-themes/server";
 import { Toaster } from "@/components/ui/sonner";
 import { ProjectProvider } from "@/context/ProjectContext";
+import { CookieConsent } from "@/components/CookieConsent";
+import { GoogleAnalytics } from "@/components/GoogleAnalytics";
+import { MicrosoftClarity } from "@/components/MicrosoftClarity";
+import {
+  SITE_DESCRIPTION,
+  SITE_KEYWORDS,
+  SITE_NAME,
+  SITE_URL,
+} from "@/lib/site";
 import { Roboto } from "next/font/google";
 
 const roboto = Roboto({
@@ -13,10 +22,54 @@ const roboto = Roboto({
 });
 
 export const metadata: Metadata = {
-  title: "Anybody.dev — AI App Builder",
-  description: "Build AI apps faster with Anybody.dev",
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: `${SITE_NAME} — The Open-Source AI App Builder`,
+    template: `%s | ${SITE_NAME}`,
+  },
+  description: SITE_DESCRIPTION,
+  keywords: SITE_KEYWORDS,
+  applicationName: SITE_NAME,
+  authors: [{ name: "Sysfora Technologies" }],
+  creator: "Sysfora Technologies",
+  publisher: "Sysfora Technologies",
+  alternates: {
+    canonical: "/",
+  },
+  openGraph: {
+    type: "website",
+    locale: "en_US",
+    url: SITE_URL,
+    siteName: SITE_NAME,
+    title: `${SITE_NAME} — The Open-Source AI App Builder`,
+    description: SITE_DESCRIPTION,
+    images: [
+      {
+        url: "/Favicon.png",
+        width: 512,
+        height: 512,
+        alt: SITE_NAME,
+      },
+    ],
+  },
+  twitter: {
+    card: "summary",
+    title: `${SITE_NAME} — The Open-Source AI App Builder`,
+    description: SITE_DESCRIPTION,
+    images: ["/Favicon.png"],
+  },
   icons: {
-    icon: "/Favicon.png",
+    icon: [{ url: "/Favicon.png", type: "image/png" }],
+    shortcut: "/Favicon.png",
+    apple: [{ url: "/Favicon.png", type: "image/png" }],
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+    },
   },
 };
 
@@ -40,6 +93,9 @@ export default async function RootLayout({
           <ProjectProvider>
             {children}
             <Toaster />
+            <CookieConsent />
+            <GoogleAnalytics />
+            <MicrosoftClarity />
           </ProjectProvider>
         </ThemeProvider>
       </body>

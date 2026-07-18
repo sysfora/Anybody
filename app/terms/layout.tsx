@@ -1,9 +1,13 @@
 import type { Metadata } from 'next'
 
 export const metadata: Metadata = {
-  title: 'Terms of Service - Anybody',
-  description: 'Terms of Service for Sysfora Technologies Private Limited. Read our terms and conditions for using our products and services.',
-  keywords: 'terms of service, terms and conditions, user agreement, Sysfora, technology',
+  title: 'Terms of Service',
+  description:
+    'Terms of Service for Sysfora Technologies Private Limited. Read the terms and conditions for using Anybody and related products.',
+  keywords: 'terms of service, terms and conditions, user agreement, Sysfora, Anybody',
+  alternates: {
+    canonical: '/terms',
+  },
 }
 
 export default function TermsLayout({

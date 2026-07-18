@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { headers } from "next/headers";
 import pb from "@/lib/pocketbase";
+import {
+  DEFAULT_CREDIT_AMOUNT,
+  getCreditsForPriceId,
+} from "@/lib/stripe";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: "2025-11-17.clover",
@@ -72,20 +76,24 @@ async function ensureAdminAuth() {
   }
 }
 
-async function updateProUserCredits(userId: string, isFirstTime: boolean = false) {
+async function updateProUserCredits(userId: string, creditsAmount?: number) {
   try {
     await ensureAdminAuth();
 
     try {
-      // Pro plan: 1000 credits per month, credits_used reset to 0 on every
-      // upgrade and on every monthly renewal.
+      const credits =
+        typeof creditsAmount === "number" && creditsAmount > 0
+          ? creditsAmount
+          : DEFAULT_CREDIT_AMOUNT;
+
+      // Reset allowance to the subscribed tier amount on upgrade / renewal.
       await pb.collection('users').update(userId, {
-        credits: 1000,
+        credits,
         credits_used: 0,
       });
 
       console.log(
-        `Reset credits for user ${userId}: 1000 credits, 0 used (${isFirstTime ? 'first time pro' : 'monthly renewal'})`,
+        `Reset credits for user ${userId}: ${credits} credits, 0 used`,
       );
     } catch (error: unknown) {
       const pbError = error as PocketBaseError;
@@ -100,7 +108,30 @@ async function updateProUserCredits(userId: string, isFirstTime: boolean = false
   }
 }
 
-async function updateUserSubscription(customerId: string, plan: 'pro' | 'free', email?: string | null, userId?: string | null) {
+async function resolveCreditsFromCustomer(customerId: string): Promise<number> {
+  try {
+    const subscriptions = await stripe.subscriptions.list({
+      customer: customerId,
+      status: "all",
+      limit: 5,
+    });
+    const active = subscriptions.data.find(
+      (sub) => sub.status === "active" || sub.status === "trialing"
+    );
+    const priceId = active?.items.data[0]?.price.id;
+    return getCreditsForPriceId(priceId ?? "") ?? DEFAULT_CREDIT_AMOUNT;
+  } catch {
+    return DEFAULT_CREDIT_AMOUNT;
+  }
+}
+
+async function updateUserSubscription(
+  customerId: string,
+  plan: "pro" | "free",
+  email?: string | null,
+  userId?: string | null,
+  creditsAmount?: number
+) {
   try {
     await ensureAdminAuth();
 
@@ -150,9 +181,7 @@ async function updateUserSubscription(customerId: string, plan: 'pro' | 'free', 
     }
 
     if (user) {
-      const wasPro = user.plan === 'pro' || user.plan === 'Pro';
       const isNowPro = plan === 'pro';
-      const isFirstTimePro = !wasPro && isNowPro;
       
       try {
         await pb.collection('users').update(user.id, {
@@ -161,9 +190,13 @@ async function updateUserSubscription(customerId: string, plan: 'pro' | 'free', 
         });
         console.log(`Updated user ${user.id} to plan: ${plan}`);
         
-        // Update credits for Pro users
+        // Update credits for Pro users from their subscribed tier (default 500).
         if (isNowPro) {
-          await updateProUserCredits(user.id, isFirstTimePro);
+          const credits =
+            typeof creditsAmount === "number" && creditsAmount > 0
+              ? creditsAmount
+              : await resolveCreditsFromCustomer(customerId);
+          await updateProUserCredits(user.id, credits);
         }
       } catch (error: unknown) {
         const pbError = error as PocketBaseError;
@@ -245,8 +278,18 @@ export async function POST(req: NextRequest) {
           if (subscriptionId) {
             await cancelOtherSubscriptions(customerId, subscriptionId);
           }
+
+          const metaCredits = session.metadata?.credits
+            ? parseInt(String(session.metadata.credits), 10)
+            : undefined;
           
-          await updateUserSubscription(customerId, 'pro', customerEmail, userId);
+          await updateUserSubscription(
+            customerId,
+            'pro',
+            customerEmail,
+            userId,
+            Number.isFinite(metaCredits) ? metaCredits : undefined
+          );
         }
         break;
       }
@@ -272,7 +315,16 @@ export async function POST(req: NextRequest) {
             console.warn("Could not retrieve customer email:", error);
           }
           
-          await updateUserSubscription(subscription.customer, isActive ? 'pro' : 'free', customerEmail);
+          const priceCredits = getCreditsForPriceId(
+            subscription.items.data[0]?.price.id ?? ""
+          );
+          await updateUserSubscription(
+            subscription.customer,
+            isActive ? 'pro' : 'free',
+            customerEmail,
+            undefined,
+            priceCredits
+          );
         }
         break;
       }
@@ -295,7 +347,16 @@ export async function POST(req: NextRequest) {
             console.warn("Could not retrieve customer email:", error);
           }
           
-          await updateUserSubscription(subscription.customer, isActive ? 'pro' : 'free', customerEmail);
+          const priceCredits = getCreditsForPriceId(
+            subscription.items.data[0]?.price.id ?? ""
+          );
+          await updateUserSubscription(
+            subscription.customer,
+            isActive ? 'pro' : 'free',
+            customerEmail,
+            undefined,
+            priceCredits
+          );
         }
         break;
       }
@@ -348,23 +409,7 @@ export async function POST(req: NextRequest) {
           // Ensure subscription is active after successful payment
           await updateUserSubscription(invoice.customer, 'pro', customerEmail, userId);
           
-          // Update credits monthly on successful payment (monthly renewal)
-          if (userId) {
-            await updateProUserCredits(userId, false);
-          } else if (customerEmail) {
-            // Try to find user by email to update credits
-            try {
-              await ensureAdminAuth();
-              const users = await pb.collection('users').getList(1, 1, {
-                filter: `email = "${customerEmail}"`,
-              });
-              if (users.items.length > 0) {
-                await updateProUserCredits(users.items[0].id, false);
-              }
-            } catch (error) {
-              console.warn("Could not update credits for monthly renewal:", error);
-            }
-          }
+          // Renewal credit reset is already handled inside updateUserSubscription.
         }
         break;
       }

@@ -5,8 +5,18 @@ import Footer from "@/components/Home/Footer";
 import { PublicProjects } from "@/components/Home/PublicProjects";
 
 export const metadata: Metadata = {
-  title: "Showcase - Anybody",
-  description: "Discover what others are building with Anybody",
+  title: "Showcase",
+  description:
+    "Discover public apps and projects built with Anybody, the open-source AI app builder.",
+  alternates: {
+    canonical: "/showcase",
+  },
+  openGraph: {
+    title: "Showcase | Anybody",
+    description:
+      "Discover public apps and projects built with Anybody, the open-source AI app builder.",
+    url: "/showcase",
+  },
 };
 
 export default function ShowcasePage() {

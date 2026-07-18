@@ -22,6 +22,7 @@ import hashlib
 import hmac as hmac_mod
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -677,6 +678,24 @@ async def _stream_generation(
         existing_html = ""
         if project_id and pb:
             existing_html = await fetch_project_html(pb, project_id)
+            if existing_html is None:
+                # Could not confirm whether the project already has HTML — do
+                # NOT fall through to full generation, since that would treat
+                # a real project as brand-new and overwrite existing work.
+                # Abort cleanly instead; no messages/status were touched yet.
+                logger.warning(
+                    "ws_app: aborting request_id=%s — could not load existing "
+                    "HTML for project_id=%s", request_id, project_id,
+                )
+                await sio.emit(
+                    "generation_error",
+                    {
+                        "request_id": request_id,
+                        "message": "Could not load the current project state — please try again.",
+                    },
+                    room=emit_target,
+                )
+                return
 
         if project_id and pb:
             if not user_message_id:
@@ -891,6 +910,85 @@ async def _maybe_repair_agent_response(
 # How many Modify-prompt patch iterations to allow in "patch mode".
 # Overridable via env var so deployments can tune cost/quality.
 MAX_PATCH_ITERATIONS = max(1, int(os.environ.get("MAX_PATCH_ITERATIONS", "5")))
+
+# ---------------------------------------------------------------------------
+# Patch matching (FIND/REPLACE application for the Modify flow)
+# ---------------------------------------------------------------------------
+#
+# The model is asked to copy FIND text "verbatim" from the current HTML, but
+# LLMs frequently introduce tiny formatting drift (whitespace, indentation,
+# line endings) when reproducing large chunks of text. A plain `str in html`
+# check is too brittle (bug: silently drops the patch) and a plain
+# `str.replace(..., 1)` is too loose (bug: can patch the wrong occurrence
+# when the snippet isn't unique). The helpers below apply a patch only when
+# it can be located *unambiguously*, and report *why* it failed otherwise so
+# the caller can retry with feedback instead of silently giving up.
+
+PatchFailReason = str  # "not_found" | "ambiguous"
+
+
+def _whitespace_tolerant_pattern(text: str) -> str:
+    """Build a regex matching *text* verbatim except runs of whitespace,
+    which become ``\\s+`` so incidental reflowing/indentation/line-ending
+    drift doesn't break the match while non-whitespace content must still
+    match exactly."""
+    parts = re.split(r"(\s+)", text)
+    out: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        out.append(r"\s+" if part.isspace() else re.escape(part))
+    return "".join(out)
+
+
+def _locate_patch_span(html: str, find_text: str) -> tuple[int, int] | PatchFailReason:
+    """Find the unique span of *find_text* in *html*.
+
+    Returns ``(start, end)`` on a single unambiguous match, or the string
+    ``"not_found"`` / ``"ambiguous"`` describing why no patch can be applied.
+    """
+    if not find_text:
+        return "not_found"
+
+    # Tier 1: exact substring match — but only if it's unique. Applying a
+    # non-unique FIND to "the first occurrence" risks silently editing the
+    # wrong spot on the page.
+    count = html.count(find_text)
+    if count == 1:
+        start = html.index(find_text)
+        return (start, start + len(find_text))
+    if count > 1:
+        return "ambiguous"
+
+    # Tier 2: whitespace-tolerant regex — tolerates line-ending differences
+    # and incidental reflowing while still requiring real content to match.
+    pattern = _whitespace_tolerant_pattern(find_text)
+    try:
+        matches = list(re.finditer(pattern, html, flags=re.DOTALL))
+    except re.error:
+        matches = []
+    if len(matches) == 1:
+        m = matches[0]
+        return (m.start(), m.end())
+    if len(matches) > 1:
+        return "ambiguous"
+
+    return "not_found"
+
+
+def _apply_patch(
+    html: str, find_text: str, replace_text: str
+) -> tuple[str, bool, str]:
+    """Attempt to apply one FIND/REPLACE patch to *html*.
+
+    Returns ``(new_html, success, reason)``. On failure ``new_html is html``
+    (unchanged) and ``reason`` is ``"not_found"`` or ``"ambiguous"``.
+    """
+    result = _locate_patch_span(html, find_text)
+    if isinstance(result, str):
+        return html, False, result
+    start, end = result
+    return html[:start] + replace_text + html[end:], True, "ok"
 
 
 class _AssistantVisibleMessageNormalizer:
@@ -1243,8 +1341,87 @@ async def _run_ai_generation(
         return reply or "Done! Let me know if you'd like any changes."
 
     # ── Branch B: patch loop (modification) ───────────────────────────────
+    #
+    # Retries are driven by *unresolved patch failures*, not by the AI's
+    # self-reported <status> — the Modify Prompt forces status=DONE on every
+    # response, so relying on a CONTINUE status would never actually loop.
+    # When a FIND block can't be located unambiguously, the next iteration
+    # tells the model exactly which blocks failed (and why) and asks it to
+    # resend just those with corrected FIND text against the updated HTML.
+
+    async def _continue_truncated_modify_file(
+        base_messages: list[dict], trigger_user_msg: dict, partial_html: str
+    ) -> tuple[str, bool]:
+        """Resume a ``<file>`` fallback that was cut off mid-stream.
+
+        Mirrors the Agent branch's continuation mechanism so a truncated
+        full-file regeneration during a modify turn completes instead of
+        silently no-op'ing (the parser never sees ``</file>`` so its
+        ``full_html`` would otherwise stay empty).
+        """
+        html_acc = partial_html
+        completed = False
+        for attempt in range(1, MAX_CONTINUATION_ATTEMPTS + 1):
+            await _emit_thinking(
+                f"\n[Full-file regeneration cut off — continuing "
+                f"(attempt {attempt}/{MAX_CONTINUATION_ATTEMPTS})...]\n"
+            )
+            cont_messages = base_messages + [
+                trigger_user_msg,
+                {
+                    "role": "assistant",
+                    "content": f'<file name="index.html">\n{html_acc}',
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous response was cut off before the HTML was "
+                        "complete. Please CONTINUE the HTML from exactly where you "
+                        "stopped. Output ONLY the remaining HTML — do NOT repeat "
+                        "anything already written and do NOT reopen <file>. "
+                        "When finished, close with </file> then <status>DONE</status>."
+                    ),
+                },
+            ]
+            cont_parser = ContinuationStreamParser()
+            try:
+                async for ai_chunk in service.complete_stream(
+                    cont_messages, "Agent", pb_ai, system=CONTINUATION_SYSTEM
+                ):
+                    t, content = ai_chunk["type"], ai_chunk["content"]
+                    if t == "thinking":
+                        await _emit_thinking(content)
+                    elif t == "text":
+                        for seg_type, seg_content in cont_parser.feed(content):
+                            if seg_type == "thinking":
+                                await _emit_thinking(seg_content)
+                            elif seg_type == "code":
+                                html_acc += seg_content
+                for seg_type, seg_content in cont_parser.flush():
+                    if seg_type == "code":
+                        html_acc += seg_content
+            except (AINoKeysError, AIAllFailedError):
+                logger.warning(
+                    "ws_app: modify file-fallback continuation exhausted models "
+                    "on attempt %d/%d", attempt, MAX_CONTINUATION_ATTEMPTS,
+                )
+                break
+
+            if cont_parser.is_done:
+                completed = True
+                break
+
+        return html_acc, completed
+
     current_html = existing_html
     iter_messages = list(history)
+    # (find_text, replace_text, reason) for patches unresolved by the most
+    # recent iteration — drives whether/how the loop retries.
+    unresolved: list[tuple[str, str, str]] = []
+    total_patches_seen = 0
+    total_patches_applied = 0
+    used_file_fallback = False
+    file_fallback_continued = False
 
     for iteration in range(MAX_PATCH_ITERATIONS):
         if iteration == 0:
@@ -1255,15 +1432,34 @@ async def _run_ai_generation(
             # First iteration may include image attachments (screenshot / mockup).
             call_user_msg = _make_user_message(user_content_text)
         else:
+            failed_blocks_text = "\n\n".join(
+                f"<<<FIND>>>\n{find_text}\n<<<REPLACE>>>\n{replace_text}\n<<<END>>>"
+                for find_text, replace_text, _ in unresolved
+            )
+            reasons = {reason for _, _, reason in unresolved}
+            if reasons == {"ambiguous"}:
+                reason_hint = "matched more than one location (ambiguous)"
+            elif reasons == {"not_found"}:
+                reason_hint = "was not found verbatim"
+            else:
+                reason_hint = "was not found verbatim, or matched more than once"
             user_content_text = (
                 f"Updated HTML after your patches:\n```html\n{current_html}\n```\n\n"
-                "Please continue making the remaining requested changes."
+                f"The following {len(unresolved)} patch block(s) {reason_hint} in the "
+                "HTML above and were NOT applied:\n\n"
+                f"{failed_blocks_text}\n\n"
+                "Re-emit ONLY these blocks inside a <patch> tag, with FIND text copied "
+                "EXACTLY (character-for-character, including whitespace) from the "
+                "Updated HTML shown above. If a block was ambiguous, include more "
+                "surrounding context in FIND so it matches only one location. If a "
+                "requested change no longer applies, omit that block."
             )
             # Continuation turns are text-only — images were already sent in iter 0.
             call_user_msg = {"role": "user", "content": user_content_text}
 
         call_messages = iter_messages + [call_user_msg]
         parser = ModifyStreamParser()
+        _msg_len_before_iter = len(_message_acc[0])
 
         try:
             async for ai_chunk in service.complete_stream(
@@ -1293,7 +1489,21 @@ async def _run_ai_generation(
         except (AINoKeysError, AIAllFailedError) as exc:
             raise RuntimeError(str(exc)) from exc
 
-        # Apply the patches collected by the parser.
+        # Cut-off <file> fallback: the model tried to regenerate the whole
+        # file but the response was truncated before </file>. Resume it
+        # instead of silently discarding the partial content.
+        if parser.in_file and parser.partial_file_content and not parser.full_html:
+            logger.info(
+                "ws_app: iteration %d — full-file fallback cut off at %d chars, "
+                "resuming via continuation", iteration + 1, len(parser.partial_file_content),
+            )
+            current_html, file_fallback_continued = await _continue_truncated_modify_file(
+                iter_messages, call_user_msg, parser.partial_file_content
+            )
+            used_file_fallback = True
+            unresolved = []
+            break
+
         # Fallback: if the model ignored the patch format and returned a full
         # HTML block instead, use that directly (avoids returning unchanged HTML).
         if not parser.patches and parser.full_html:
@@ -1303,46 +1513,49 @@ async def _run_ai_generation(
                 iteration + 1, len(parser.full_html),
             )
             current_html = parser.full_html
+            used_file_fallback = True
+            unresolved = []
         else:
-            patch_count = 0
+            new_unresolved: list[tuple[str, str, str]] = []
+            applied_this_round = 0
             for find_text, replace_text in parser.patches:
                 if not find_text:
                     continue
-                if find_text in current_html:
-                    current_html = current_html.replace(find_text, replace_text, 1)
-                    patch_count += 1
+                total_patches_seen += 1
+                current_html, ok, reason = _apply_patch(current_html, find_text, replace_text)
+                if ok:
+                    applied_this_round += 1
+                    total_patches_applied += 1
                 else:
-                    # Fallback: normalize line endings and try again
-                    normalized_html = current_html.replace("\r\n", "\n").replace("\r", "\n")
-                    normalized_find = find_text.replace("\r\n", "\n").replace("\r", "\n")
-                    if normalized_find in normalized_html:
-                        idx = normalized_html.index(normalized_find)
-                        current_html = (
-                            current_html[:idx]
-                            + replace_text
-                            + current_html[idx + len(normalized_find):]
-                        )
-                        patch_count += 1
-                        logger.info(
-                            "ws_app: patch applied after line-ending normalization (%.80r…)",
-                            find_text,
-                        )
-                    else:
-                        logger.warning(
-                            "ws_app: patch FIND text not found (%.80r…)", find_text
-                        )
+                    new_unresolved.append((find_text, replace_text, reason))
+                    logger.warning(
+                        "ws_app: patch %s (iter %d/%d): %.80r…",
+                        reason, iteration + 1, MAX_PATCH_ITERATIONS, find_text,
+                    )
             logger.info(
-                "ws_app: iteration %d — applied %d/%d patch(es)",
-                iteration + 1, patch_count, len(parser.patches),
+                "ws_app: iteration %d — applied %d/%d patch(es), %d unresolved",
+                iteration + 1, applied_this_round, len(parser.patches), len(new_unresolved),
             )
+            unresolved = new_unresolved
 
-        if parser.is_done or not parser.wants_continuation:
+        if not unresolved:
             break
+        if iteration == MAX_PATCH_ITERATIONS - 1:
+            break  # out of retries — remaining `unresolved` reported below
 
-        # Another iteration — give the AI context of what changed.
-        # Use text-only for history entries (images already sent in iter 0).
-        iter_messages.append({"role": "user", "content": user_content_text})
-        iter_messages.append({"role": "assistant", "content": ""})  # placeholder
+        # Retry: give the AI the updated HTML plus exactly which blocks failed.
+        this_iter_message = _message_acc[0][_msg_len_before_iter:]
+        iter_messages.append(call_user_msg)
+        iter_messages.append(
+            {"role": "assistant", "content": this_iter_message or "(no visible message)"}
+        )
+
+    logger.info(
+        "ws_app: modify request_id=%s summary: patches_seen=%d patches_applied=%d "
+        "unresolved=%d file_fallback=%s file_fallback_continued=%s",
+        request_id, total_patches_seen, total_patches_applied, len(unresolved),
+        used_file_fallback, file_fallback_continued,
+    )
 
     # Stream the final patched HTML to client as code_chunks
     html_acc_holder["val"] = ""
@@ -1351,6 +1564,14 @@ async def _run_ai_generation(
     for i in range(0, len(current_html), STREAM_STEP):
         await _emit_code(current_html[i : i + STREAM_STEP])
         await asyncio.sleep(0.003)
+
+    if unresolved:
+        count = len(unresolved)
+        await _emit_message(
+            f"\n\n⚠️ {count} change{'s' if count != 1 else ''} could not be applied "
+            "automatically. Try rephrasing the request or describing the change in "
+            "smaller steps."
+        )
 
     _msg_nl.finish()
     reply = _message_acc[0].strip("\r\n")

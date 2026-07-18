@@ -80,7 +80,10 @@ export const CREDIT_TIERS: CreditTier[] = [
   yearlyPriceId: resolveCreditTierPriceId(tier.credits, "yearly"),
 }));
 
-export const DEFAULT_CREDIT_TIER = CREDIT_TIERS[1]; // 1000 credits
+export const DEFAULT_CREDIT_TIER =
+  CREDIT_TIERS.find((tier) => tier.credits === 500) ?? CREDIT_TIERS[0];
+
+export const DEFAULT_CREDIT_AMOUNT = DEFAULT_CREDIT_TIER.credits;
 
 /** Per-month display price for the selected billing cycle. */
 export function getTierMonthlyDisplayPrice(

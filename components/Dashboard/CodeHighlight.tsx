@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, type HTMLProps } from "react"
 import { useTheme } from "@teispace/next-themes"
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneLight, vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -67,7 +67,10 @@ export function CodeHighlight({ code, language, variant = 'default' }: CodeHighl
                     whiteSpace: 'pre',
                     boxSizing: 'border-box',
                 }}
-                wrapLines={false}
+                wrapLines={true}
+                lineProps={(lineNumber: number) =>
+                    ({ 'data-line-number': String(lineNumber) }) as HTMLProps<HTMLElement>
+                }
                 wrapLongLines={false}
                 showLineNumbers={true}
                 lineNumberStyle={{

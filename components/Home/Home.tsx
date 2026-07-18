@@ -57,9 +57,12 @@ export const Content = () => {
             const raw = localStorage.getItem(SUBSCRIPTION_RESUME_KEY);
             if (raw) {
                 const data = JSON.parse(raw) as SubscriptionResumeData;
-                if (data.returnTo === '/') {
-                    if (data.pendingPrompt) setChatInput(data.pendingPrompt);
-                    if (data.pendingVisibility === 'public' || data.pendingVisibility === 'private') {
+                const returnTo = data.returnTo?.trim() || "/";
+                if (returnTo === "/" || returnTo === "") {
+                    if (data.pendingPrompt) {
+                        setChatInput(data.pendingPrompt);
+                    }
+                    if (data.pendingVisibility === "public" || data.pendingVisibility === "private") {
                         setChatVisibility(data.pendingVisibility);
                     }
                     localStorage.removeItem(SUBSCRIPTION_RESUME_KEY);
