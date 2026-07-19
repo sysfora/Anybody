@@ -338,7 +338,6 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
                 )}
               >
                 <MessageSquare className="h-3.5 w-3.5 shrink-0" />
-                <span className="sm:inline">Chat</span>
               </button>
               <button
                 onClick={() => setMobileShowPreview(true)}
@@ -350,7 +349,6 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
                 )}
               >
                 <Eye className="h-3.5 w-3.5 shrink-0" />
-                <span className="sm:inline">Preview</span>
                 {/* Pulse indicator when code is being generated */}
                 {isWorking && !mobileShowPreview && (
                   <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-primary animate-pulse" />
@@ -502,7 +500,7 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
               size="sm"
               onClick={handleDownload}
               disabled={demoMode || !hasProject || isWorking || isDownloading}
-              className="hidden sm:flex h-8 gap-1.5 px-3 items-center"
+              className="h-8 gap-1.5 px-3 flex items-center"
               title={demoMode ? 'Not available in demo' : 'Download project'}
             >
               {isDownloading ? (
@@ -771,13 +769,13 @@ export function NavigationBar({ variant = 'default', demoMode = false }: Navigat
             <span className="hidden lg:inline text-xs">Deploy</span>
           </Button>
 
-          {/* Download – hidden on mobile */}
+          {/* Download */}
           <Button
             variant="outline"
             size="sm"
             onClick={handleDownload}
             disabled={!hasProject || isWorking || isDownloading}
-            className="hidden sm:flex h-8 gap-1.5 px-3 items-center"
+            className="h-8 gap-1.5 px-3 flex items-center"
             title="Download project"
           >
             {isDownloading ? (

@@ -64,7 +64,7 @@ export function Navbar() {
                     </div>
 
                     {/* Desktop Navigation Links */}
-                    <div className="hidden md:flex items-center gap-6">
+                    <div className="hidden md:flex items-center gap-6 pl-12">
                         {navLinks.map((link) => {
                             const Icon = link.icon;
                             return (

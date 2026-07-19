@@ -40,7 +40,7 @@ export function CookieConsent() {
       aria-label="Cookie consent"
       className="fixed inset-x-0 bottom-0 z-[100] p-4 sm:p-6"
     >
-      <div className="mx-auto flex max-w-3xl flex-col gap-4 rounded-xl border border-border bg-white/95 p-4 shadow-lg backdrop-blur-md dark:bg-black/95 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+      <div className="mx-auto flex max-w-md flex-col gap-4 rounded-xl border border-border bg-white/95 p-4 shadow-lg backdrop-blur-md dark:bg-black/95 sm:flex-row sm:items-center sm:justify-between sm:p-5">
         <p className="text-sm leading-relaxed text-black dark:text-white">
           We use cookies to ensure that we give you the best experience on our
           website. Read{" "}

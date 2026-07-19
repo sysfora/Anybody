@@ -904,6 +904,15 @@ export default function ChatView({
       const preEditHtml = preEditHtmlRef.current;
       const usedIncrementalPatches = receivedPatchAppliedRef.current;
 
+      toast.success(
+        wasModifyTurn ? 'Changes applied' : 'Generation complete',
+        {
+          description: wasModifyTurn
+            ? 'Your requested changes have been applied.'
+            : 'Your app is ready to preview.',
+        },
+      );
+
       if (!wasModifyTurn) {
         // First-prompt behavior, unchanged: the file already streamed in
         // live via code_chunk, so flip to Preview immediately.
