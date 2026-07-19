@@ -10,7 +10,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-blue.svg)](https://www.typescriptlang.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind-4-38bdf8.svg)](https://tailwindcss.com/)
 
-**Anybody — describe your idea. Get a full app.**
+**Anybody — The Open-Source AI App Builder**
 
 [Features](#-features) • [Installation](#-installation) • [Usage](#-usage-guide) • [Contributing](#-contributing) • [Support](#-support)
 
@@ -43,7 +43,7 @@
 
 ## 🌟 About
 
-**Anybody** is an AI-powered app generator. Enter a prompt, attach optional files, and watch your application get built in real time with live code streaming and step-by-step status updates.
+**Anybody** is an AI-powered app generator. Enter a prompt, attach optional files, and watch your application get built in real time.
 
 ### Why This Project?
 
