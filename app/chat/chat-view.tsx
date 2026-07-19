@@ -186,6 +186,12 @@ export default function ChatView({
   // new patch_applied's animation is chained onto the promise for the one
   // before it.
   const patchAnimationChainRef = useRef<Promise<void>>(Promise.resolve());
+  // Highest step number received so far. If a queued step's turn to
+  // animate comes up but a *newer* step has since arrived, that step is
+  // stale — snap straight to its target instead of animating, so a burst
+  // of fast steps can never pile up a backlog that keeps "editing" on
+  // screen well after generation has actually finished.
+  const latestPatchStepRef = useRef(0);
 
   const [projectLoadStatus, setProjectLoadStatus] = useState<string | null>(
     null,
@@ -825,14 +831,21 @@ export default function ChatView({
       receivedPatchAppliedRef.current = true;
 
       const myToken = animationTokenRef.current;
+      const myStep = payload.step;
       const targetHtml = payload.html;
       const stillCurrent = () => animationTokenRef.current === myToken;
+      latestPatchStepRef.current = myStep;
 
       patchAnimationChainRef.current = patchAnimationChainRef.current
         .then(async () => {
           if (!stillCurrent()) return;
 
-          if (prefersReducedMotion()) {
+          // A newer step already landed while this one was queued behind a
+          // slower predecessor — skip straight to it instead of animating,
+          // so the display catches back up to real time immediately.
+          const isStale = myStep !== latestPatchStepRef.current;
+
+          if (prefersReducedMotion() || isStale) {
             htmlSourceRef.current = targetHtml;
             setHtmlSource(targetHtml);
             return;
@@ -844,6 +857,10 @@ export default function ChatView({
             before: htmlSourceRef.current,
             after: targetHtml,
             isCancelled: () => !stillCurrent(),
+            // Small per-step edits should read as a quick, snappy typing
+            // burst, not a deliberate reveal — keep the whole step's
+            // animation within well under a second even with several hunks.
+            maxTotalDurationMs: 500,
             onUpdate: (text) => {
               // Update the ref synchronously (not just via the htmlSource
               // effect) so the NEXT patch_applied — or the final
@@ -1043,6 +1060,7 @@ export default function ChatView({
     preEditHtmlRef.current = null;
     receivedPatchAppliedRef.current = false;
     patchAnimationChainRef.current = Promise.resolve();
+    latestPatchStepRef.current = 0;
     pendingAssistantIdRef.current = null;
     pendingRequestIdRef.current = null;
     // Clear all project-specific refs so stale data can never bleed into the new session.
@@ -1215,6 +1233,7 @@ export default function ChatView({
       preEditHtmlRef.current = htmlSourceRef.current;
       receivedPatchAppliedRef.current = false;
       patchAnimationChainRef.current = Promise.resolve();
+      latestPatchStepRef.current = 0;
       // Let this turn's first preview update land immediately rather than
       // inheriting the throttle window from whatever the last turn did.
       lastPreviewFlushAtRef.current = 0;

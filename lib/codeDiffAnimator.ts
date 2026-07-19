@@ -40,6 +40,16 @@ export interface AnimateHtmlDiffOptions {
    * a degenerate multi-minute animation on a whole-file regeneration).
    */
   maxAnimatedChars?: number;
+  /**
+   * Hard cap on the *whole* animation's wall-clock duration, in ms,
+   * regardless of how many hunks there are. `msPerHunk` is scaled down
+   * automatically (down to `minMsPerHunk`) so many small hunks still
+   * finish quickly instead of playing out at `msPerHunk` each — which is
+   * what made edits with several hunks feel sluggish.
+   */
+  maxTotalDurationMs?: number;
+  /** Floor for the per-hunk duration when scaling down for `maxTotalDurationMs`. */
+  minMsPerHunk?: number;
 }
 
 interface Hunk {
@@ -49,9 +59,15 @@ interface Hunk {
   addedText: string;
 }
 
-const DEFAULT_MS_PER_HUNK = 700;
-const DEFAULT_TICK_INTERVAL_MS = 20;
+// Tuned for a fast, snappy "typing" feel rather than a deliberate slow
+// reveal — with many small agentic patch steps now animating in sequence
+// (one per AI call), anything slower makes the code panel visibly lag
+// behind generation, which is complete already by the time it catches up.
+const DEFAULT_MS_PER_HUNK = 220;
+const DEFAULT_TICK_INTERVAL_MS = 12;
 const DEFAULT_MAX_ANIMATED_CHARS = 6000;
+const DEFAULT_MAX_TOTAL_DURATION_MS = 1400;
+const DEFAULT_MIN_MS_PER_HUNK = 40;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -122,6 +138,8 @@ export async function animateHtmlDiff({
   msPerHunk = DEFAULT_MS_PER_HUNK,
   tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
   maxAnimatedChars = DEFAULT_MAX_ANIMATED_CHARS,
+  maxTotalDurationMs = DEFAULT_MAX_TOTAL_DURATION_MS,
+  minMsPerHunk = DEFAULT_MIN_MS_PER_HUNK,
 }: AnimateHtmlDiffOptions): Promise<void> {
   if (before === after) {
     if (!isCancelled()) onUpdate(after);
@@ -142,6 +160,15 @@ export async function animateHtmlDiff({
     return;
   }
 
+  // Scale the per-hunk duration down so N hunks together still finish
+  // within `maxTotalDurationMs` — otherwise a diff with many hunks (e.g. a
+  // handful of separate small edits landing as one step) would take
+  // `msPerHunk * hunks.length`, which visibly falls behind real-time.
+  const effectiveMsPerHunk = Math.max(
+    minMsPerHunk,
+    Math.min(msPerHunk, maxTotalDurationMs / hunks.length),
+  );
+
   let buffer = before;
 
   for (const hunk of hunks) {
@@ -153,7 +180,7 @@ export async function animateHtmlDiff({
     // backspace, so the removal reads as a deliberate edit.
     if (hunk.removedText.length > 0) {
       const base = buffer;
-      const step = charsPerTick(hunk.removedText.length, msPerHunk, tickIntervalMs);
+      const step = charsPerTick(hunk.removedText.length, effectiveMsPerHunk, tickIntervalMs);
       let remaining = hunk.removedText.length;
       while (remaining > 0) {
         if (isCancelled()) return;
@@ -169,7 +196,7 @@ export async function animateHtmlDiff({
     // Type phase — insert the new text left-to-right at the same spot.
     if (hunk.addedText.length > 0) {
       const base = buffer;
-      const step = charsPerTick(hunk.addedText.length, msPerHunk, tickIntervalMs);
+      const step = charsPerTick(hunk.addedText.length, effectiveMsPerHunk, tickIntervalMs);
       let typed = 0;
       while (typed < hunk.addedText.length) {
         if (isCancelled()) return;
