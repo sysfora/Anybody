@@ -50,6 +50,16 @@ export interface AnimateHtmlDiffOptions {
   maxTotalDurationMs?: number;
   /** Floor for the per-hunk duration when scaling down for `maxTotalDurationMs`. */
   minMsPerHunk?: number;
+  /**
+   * Minimum gap, in ms, between real `onUpdate` invocations. `onUpdate`
+   * typically feeds a syntax highlighter that re-tokenizes the *entire*
+   * file on every call — doing that on every single tick (every ~10ms) is
+   * expensive enough to make the whole animation stutter and visibly fall
+   * behind the tick schedule. Throttling the actual render calls (while
+   * still tracking the true buffer/scroll position every tick internally)
+   * keeps the browser responsive so the animation plays at its real speed.
+   */
+  renderThrottleMs?: number;
 }
 
 interface Hunk {
@@ -68,6 +78,7 @@ const DEFAULT_TICK_INTERVAL_MS = 12;
 const DEFAULT_MAX_ANIMATED_CHARS = 6000;
 const DEFAULT_MAX_TOTAL_DURATION_MS = 1400;
 const DEFAULT_MIN_MS_PER_HUNK = 40;
+const DEFAULT_RENDER_THROTTLE_MS = 50;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -140,6 +151,7 @@ export async function animateHtmlDiff({
   maxAnimatedChars = DEFAULT_MAX_ANIMATED_CHARS,
   maxTotalDurationMs = DEFAULT_MAX_TOTAL_DURATION_MS,
   minMsPerHunk = DEFAULT_MIN_MS_PER_HUNK,
+  renderThrottleMs = DEFAULT_RENDER_THROTTLE_MS,
 }: AnimateHtmlDiffOptions): Promise<void> {
   if (before === after) {
     if (!isCancelled()) onUpdate(after);
@@ -171,10 +183,34 @@ export async function animateHtmlDiff({
 
   let buffer = before;
 
+  // `onUpdate` is expensive (it feeds a full-file syntax highlighter), so we
+  // only actually call it at most once every `renderThrottleMs` — except
+  // the very last write of each hunk, which is always forced through so a
+  // hunk never visibly leaves a half-typed state on screen.
+  let lastRenderAt = 0;
+  const emitUpdate = (text: string, force: boolean) => {
+    const now = Date.now();
+    if (!force && now - lastRenderAt < renderThrottleMs) return;
+    lastRenderAt = now;
+    onUpdate(text);
+  };
+
+  // `onScrollToLine` is cheap and caller-side idempotent (it no-ops unless
+  // the target line is actually out of view), so it's called on every tick
+  // — this is what makes the panel keep following the write position as it
+  // moves down across multiple lines, instead of only scrolling once at
+  // the start of each hunk.
+  let lastScrollLine = -1;
+  const emitScroll = (line: number) => {
+    if (line === lastScrollLine) return;
+    lastScrollLine = line;
+    onScrollToLine?.(line);
+  };
+
   for (const hunk of hunks) {
     if (isCancelled()) return;
 
-    onScrollToLine?.(lineNumberAtOffset(buffer, hunk.offset));
+    emitScroll(lineNumberAtOffset(buffer, hunk.offset));
 
     // Delete phase — shrink the old text from its tail backwards, like a
     // backspace, so the removal reads as a deliberate edit.
@@ -188,7 +224,8 @@ export async function animateHtmlDiff({
         buffer =
           base.slice(0, hunk.offset + remaining) +
           base.slice(hunk.offset + hunk.removedText.length);
-        onUpdate(buffer);
+        emitUpdate(buffer, remaining === 0);
+        emitScroll(lineNumberAtOffset(buffer, hunk.offset + remaining));
         if (remaining > 0) await sleep(tickIntervalMs);
       }
     }
@@ -202,8 +239,12 @@ export async function animateHtmlDiff({
         if (isCancelled()) return;
         typed = Math.min(hunk.addedText.length, typed + step);
         buffer = base.slice(0, hunk.offset) + hunk.addedText.slice(0, typed) + base.slice(hunk.offset);
-        onUpdate(buffer);
-        if (typed < hunk.addedText.length) await sleep(tickIntervalMs);
+        const done = typed >= hunk.addedText.length;
+        emitUpdate(buffer, done);
+        // Follow the *end* of what's been typed so far — as new lines
+        // appear below the fold, the view scrolls down to keep up.
+        emitScroll(lineNumberAtOffset(buffer, hunk.offset + typed));
+        if (!done) await sleep(tickIntervalMs);
       }
     }
   }

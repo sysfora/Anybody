@@ -330,12 +330,27 @@ export default function ChatView({
     codeStickBottomRef.current = isNearScrollBottom(el);
   }, []);
 
-  /** Scroll the code panel so the given 1-based line is centered in view. */
+  /**
+   * Keep the given 1-based line visible in the code panel while the
+   * typewriter animation writes it. Called on every animation tick as the
+   * write position moves (including across multiple lines within a single
+   * hunk), so it deliberately only scrolls when the line has actually
+   * drifted out of view — otherwise it's a no-op, which keeps this cheap
+   * enough to call that often and avoids fighting a smooth-scroll that's
+   * already in flight from the previous tick.
+   */
   const scrollCodeToLine = useCallback((lineNumber: number) => {
     const container = codeScrollRef.current;
     if (!container) return;
     const lineEl = container.querySelector(`[data-line-number="${lineNumber}"]`);
-    lineEl?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    if (!lineEl) return;
+    const containerRect = container.getBoundingClientRect();
+    const lineRect = lineEl.getBoundingClientRect();
+    const margin = 32;
+    const isAbove = lineRect.top < containerRect.top + margin;
+    const isBelow = lineRect.bottom > containerRect.bottom - margin;
+    if (!isAbove && !isBelow) return;
+    lineEl.scrollIntoView({ block: isBelow ? 'end' : 'center', behavior: 'smooth' });
   }, []);
 
   useLayoutEffect(() => {
@@ -1049,12 +1064,18 @@ export default function ChatView({
   }, [clearGenerationWatchdog]);
 
   const handleNewProject = () => {
-    const req = pendingRequestIdRef.current;
-    if (req) {
-      getSocket().emit('stop_generation', { request_id: req });
-    }
+    // Intentionally do NOT emit 'stop_generation' here. Each generation is
+    // independent and keyed by its own request_id server-side — leaving this
+    // project to start a new one must never cancel a turn that's still
+    // in-flight for it. The server keeps running that generation and
+    // persists its result to the project record regardless of whether this
+    // tab is still listening; we just detach locally (below) so its events
+    // are no longer routed to this now-blank session. The user can navigate
+    // back to that project later and see it finished.
     clearGenerationWatchdog();
-    // Cancel any in-flight diff animation from the project being left behind.
+    // Cancel only the local diff animation for the project being left
+    // behind (a purely visual/client-side concern) — the underlying
+    // generation itself is left running server-side.
     animationTokenRef.current += 1;
     isModifyTurnRef.current = false;
     preEditHtmlRef.current = null;
