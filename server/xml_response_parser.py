@@ -1,4 +1,8 @@
-"""Parse structured XML-like AI responses for Agent and Modify flows.
+"""Parse structured XML-like AI responses (plan/message/file/footer/status).
+
+Used for both brand-new generation and full-file edits — both flows return
+the same tag structure, they only differ in the system prompt and whether
+the current HTML is included as context.
 
 Streaming uses explicit tag boundaries (safe for raw HTML inside ``<file>``).
 Full-response parsing uses the same boundary extraction — not a whole-document
@@ -31,7 +35,7 @@ _PATCH_BLOCK_RE = re.compile(
 REPAIR_PROMPT = """Fix the following response.
 
 Rules:
-- Do not modify code inside <file> or inside <<<FIND>>> / <<<REPLACE>>> blocks.
+- Do not modify code inside <file>.
 - Do not modify HTML.
 - Only restore missing or malformed XML-like tags and section order.
 - Never add markdown code fences.
@@ -52,7 +56,9 @@ class AgentStructuredResponse:
 
 
 @dataclass
-class ModifyStructuredResponse:
+class PatchStepStructuredResponse:
+    """One step of the agentic small-patch modify loop."""
+
     plan: str = ""
     message: str = ""
     footer: str = ""
@@ -96,6 +102,30 @@ def _extract_patches(text: str) -> list[tuple[str, str]]:
     return [(m.group(1), m.group(2)) for m in _PATCH_BLOCK_RE.finditer(patch_body)]
 
 
+def parse_patch_step_response(response: str) -> PatchStepStructuredResponse:
+    file_data = _extract_file(response)
+    return PatchStepStructuredResponse(
+        plan=_extract_between(response, "<plan>", "</plan>").strip(),
+        message=_extract_between(response, "<message>", "</message>").strip(),
+        footer=_extract_between(response, "<footer>", "</footer>").strip(),
+        status=_extract_status(response),
+        patches=_extract_patches(response),
+        file={"name": file_data["name"], "content": file_data["content"]},
+    )
+
+
+def validate_patch_step_response(parsed: PatchStepStructuredResponse) -> None:
+    missing: list[str] = []
+    if not parsed.message:
+        missing.append("message")
+    if not parsed.status:
+        missing.append("status")
+    if not parsed.patches and not parsed.file.get("content"):
+        missing.append("patch or file")
+    if missing:
+        raise ValueError(f"Missing tag(s): {', '.join(missing)}")
+
+
 def parse_agent_response(response: str) -> AgentStructuredResponse:
     file_data = _extract_file(response)
     return AgentStructuredResponse(
@@ -103,18 +133,6 @@ def parse_agent_response(response: str) -> AgentStructuredResponse:
         message=_extract_between(response, "<message>", "</message>").strip(),
         footer=_extract_between(response, "<footer>", "</footer>").strip(),
         status=_extract_status(response),
-        file={"name": file_data["name"], "content": file_data["content"]},
-    )
-
-
-def parse_modify_response(response: str) -> ModifyStructuredResponse:
-    file_data = _extract_file(response)
-    return ModifyStructuredResponse(
-        plan=_extract_between(response, "<plan>", "</plan>").strip(),
-        message=_extract_between(response, "<message>", "</message>").strip(),
-        footer=_extract_between(response, "<footer>", "</footer>").strip(),
-        status=_extract_status(response),
-        patches=_extract_patches(response),
         file={"name": file_data["name"], "content": file_data["content"]},
     )
 
@@ -135,38 +153,22 @@ def validate_agent_response(parsed: AgentStructuredResponse) -> None:
         raise ValueError(f"Missing tag(s): {', '.join(missing)}")
 
 
-def validate_modify_response(parsed: ModifyStructuredResponse) -> None:
-    missing: list[str] = []
-    if not parsed.plan:
-        missing.append("plan")
-    if not parsed.message:
-        missing.append("message")
-    if not parsed.footer:
-        missing.append("footer")
-    if not parsed.status:
-        missing.append("status")
-    if not parsed.patches and not parsed.file.get("content"):
-        missing.append("patch or file")
-    if missing:
-        raise ValueError(f"Missing tag(s): {', '.join(missing)}")
-
-
-def _strip_file_and_patch(response: str) -> str:
+def _strip_file(response: str) -> str:
     out = response
     for m in list(_FILE_OPEN_RE.finditer(response)):
         out = out.replace(m.group(0), "<file-placeholder/>")
         close = response.lower().find("</file>", m.end())
         if close != -1:
             out = out.replace(response[m.end() : close + len("</file>")], "")
-    patch_start = out.find("<patch>")
-    patch_end = out.find("</patch>")
-    if patch_start != -1 and patch_end != -1:
-        out = out[:patch_start] + "<patch-placeholder/>" + out[patch_end + len("</patch>") :]
     return out
 
 
-def validate_response_xml_fragments(response: str, mode: Literal["agent", "modify"]) -> bool:
-    wrapper = f"<root>{_strip_file_and_patch(response)}</root>"
+def validate_response_xml_fragments(response: str) -> bool:
+    """Sanity-check that *response* is well-formed plan/message/footer/status
+    XML fragments (ignoring the ``<file>`` body, which may contain raw,
+    unescaped HTML) plus a ``<file>`` tag. Used by callers that want a
+    structural check without a full streaming parse."""
+    wrapper = f"<root>{_strip_file(response)}</root>"
     try:
         root = ET.fromstring(wrapper)
     except ET.ParseError:
@@ -174,9 +176,7 @@ def validate_response_xml_fragments(response: str, mode: Literal["agent", "modif
     for tag in ("plan", "message", "footer", "status"):
         if root.find(tag) is None:
             return False
-    if mode == "agent":
-        return _FILE_OPEN_RE.search(response) is not None
-    return bool(_extract_patches(response)) or _FILE_OPEN_RE.search(response) is not None
+    return _FILE_OPEN_RE.search(response) is not None
 
 
 class _XmlSectionStreamParserBase:
@@ -327,8 +327,17 @@ class ContinuationStreamParser(_XmlSectionStreamParserBase):
         return super()._try_enter_section()
 
 
-class ModifyStreamParser(_XmlSectionStreamParserBase):
-    """Stream Modify responses; accumulates patches and optional full-file fallback."""
+class PatchStepStreamParser(_XmlSectionStreamParserBase):
+    """Stream one step of the agentic small-patch modify loop.
+
+    Accumulates ``<patch>`` FIND/REPLACE blocks and supports the ``<file>``
+    escape hatch for when patching isn't feasible for a given step. Unlike
+    :class:`AgentStreamParser`, ``<status>CONTINUE</status>`` is a normal,
+    meaningful outcome here (not just DONE) — it's what drives the agentic
+    loop to call the model again for the next step.
+    """
+
+    _PATCH_HOLD = max(len("<<<FIND>>>"), len("<<<REPLACE>>>"), len("<<<END>>>")) - 1
 
     def __init__(self) -> None:
         super().__init__()
@@ -354,31 +363,20 @@ class ModifyStreamParser(_XmlSectionStreamParserBase):
     def feed(self, text: str) -> list[tuple[SegmentType, str]]:
         if self._state == "patch":
             self._patch_buf += text
-            if "</patch>" in self._patch_buf:
-                self._close_patch()
-            else:
-                self._consume_patch_lines()
+            self._drain_patch(final=False)
             if self._buf:
                 return self.feed("")
             return []
         events = super().feed(text)
         if self._state == "patch":
-            if "</patch>" in self._patch_buf:
-                self._close_patch()
-            else:
-                self._consume_patch_lines()
+            self._drain_patch(final=False)
             if self._buf:
                 events.extend(self.feed(""))
         return events
 
     def flush(self) -> list[tuple[SegmentType, str]]:
-        if self._state == "patch" and self._patch_buf:
-            if "</patch>" in self._patch_buf:
-                self._close_patch()
-            else:
-                self._consume_patch_text(self._patch_buf)
-                self._patch_buf = ""
-                self._state = "idle"
+        if self._state == "patch":
+            self._drain_patch(final=True)
         events = super().flush()
         if self._buf:
             events.extend(super().feed(""))
@@ -386,9 +384,10 @@ class ModifyStreamParser(_XmlSectionStreamParserBase):
         return events
 
     def _try_enter_section(self) -> bool:
-        idx = self._buf.find("<patch>")
-        if idx != -1:
-            self._patch_buf = self._buf[idx + len("<patch>") :]
+        patch_idx = self._buf.find("<patch>")
+        other_idx = self._earliest_other_section_idx()
+        if patch_idx != -1 and (other_idx is None or patch_idx < other_idx):
+            self._patch_buf = self._buf[patch_idx + len("<patch>") :]
             self._buf = ""
             self._state = "patch"
             self._patch_substate = "body"
@@ -397,12 +396,98 @@ class ModifyStreamParser(_XmlSectionStreamParserBase):
             return True
         return super()._try_enter_section()
 
-    def _close_patch(self) -> None:
-        body, _, rest = self._patch_buf.partition("</patch>")
-        self._consume_patch_text(body)
-        self._patch_buf = ""
-        self._state = "idle"
-        self._buf = rest + self._buf
+    def _earliest_other_section_idx(self) -> int | None:
+        indices = []
+        for tag in ("<plan>", "<message>", "<footer>"):
+            idx = self._buf.find(tag)
+            if idx != -1:
+                indices.append(idx)
+        fm = _FILE_OPEN_RE.search(self._buf)
+        if fm:
+            indices.append(fm.start())
+        return min(indices) if indices else None
+
+    def _drain_patch(self, *, final: bool) -> None:
+        """Consume ``self._patch_buf`` (raw text inside ``<patch>...</patch>``),
+        scanning for the ``<<<FIND>>>`` / ``<<<REPLACE>>>`` / ``<<<END>>>``
+        markers and the closing ``</patch>`` tag. Any bytes not yet safely
+        past a possible partial-marker boundary are held back for the next
+        chunk, unless ``final`` (end of stream) is set.
+        """
+        while True:
+            close_idx = self._patch_buf.find("</patch>")
+
+            if self._patch_substate == "body":
+                marker_idx = self._patch_buf.find("<<<FIND>>>")
+                if marker_idx != -1 and (close_idx == -1 or marker_idx < close_idx):
+                    self._patch_buf = self._patch_buf[marker_idx + len("<<<FIND>>>") :]
+                    self._patch_substate = "find"
+                    self._find_acc = ""
+                    continue
+                if close_idx != -1:
+                    self._buf = self._patch_buf[close_idx + len("</patch>") :] + self._buf
+                    self._patch_buf = ""
+                    self._state = "idle"
+                    return
+                if not final:
+                    hold = self._PATCH_HOLD
+                    if len(self._patch_buf) > hold:
+                        self._patch_buf = self._patch_buf[-hold:]
+                return
+
+            marker = "<<<REPLACE>>>" if self._patch_substate == "find" else "<<<END>>>"
+            marker_idx = self._patch_buf.find(marker)
+            if marker_idx != -1 and (close_idx == -1 or marker_idx < close_idx):
+                chunk = self._patch_buf[:marker_idx]
+                if self._patch_substate == "find":
+                    self._find_acc += chunk
+                    self._patch_substate = "replace"
+                    self._replace_acc = ""
+                else:
+                    self._replace_acc += chunk
+                    self.patches.append((self._find_acc, self._replace_acc))
+                    self._find_acc = ""
+                    self._replace_acc = ""
+                    self._patch_substate = "body"
+                self._patch_buf = self._patch_buf[marker_idx + len(marker) :]
+                continue
+
+            if close_idx != -1:
+                # ``</patch>`` arrived before the marker we were waiting for —
+                # treat the remaining body as belonging to the open segment so
+                # nothing is silently dropped, then close the tag.
+                chunk = self._patch_buf[:close_idx]
+                if self._patch_substate == "find":
+                    self._find_acc += chunk
+                else:
+                    self._replace_acc += chunk
+                    self.patches.append((self._find_acc, self._replace_acc))
+                self._find_acc = ""
+                self._replace_acc = ""
+                self._patch_substate = "body"
+                self._buf = self._patch_buf[close_idx + len("</patch>") :] + self._buf
+                self._patch_buf = ""
+                self._state = "idle"
+                return
+
+            if final:
+                chunk = self._patch_buf
+                if self._patch_substate == "find":
+                    self._find_acc += chunk
+                else:
+                    self._replace_acc += chunk
+                self._patch_buf = ""
+                return
+
+            hold = self._PATCH_HOLD
+            if len(self._patch_buf) > hold:
+                safe = self._patch_buf[:-hold]
+                self._patch_buf = self._patch_buf[-hold:]
+                if self._patch_substate == "find":
+                    self._find_acc += safe
+                else:
+                    self._replace_acc += safe
+            return
 
     def _try_status(self) -> bool:
         m = _STATUS_RE.search(self._buf)
@@ -431,38 +516,6 @@ class ModifyStreamParser(_XmlSectionStreamParserBase):
             self.full_html = self._file_acc
             self._file_acc = ""
         super()._on_close_section()
-
-    def _consume_patch_lines(self) -> None:
-        while "\n" in self._patch_buf:
-            line, self._patch_buf = self._patch_buf.split("\n", 1)
-            self._process_patch_line(line + "\n")
-
-    def _consume_patch_text(self, text: str) -> None:
-        for line in text.splitlines(keepends=True):
-            self._process_patch_line(line)
-        if text and not text.endswith("\n"):
-            self._process_patch_line(text)
-
-    def _process_patch_line(self, line: str) -> None:
-        stripped = line.strip()
-        if stripped == "<<<FIND>>>":
-            self._patch_substate = "find"
-            self._find_acc = ""
-            return
-        if stripped == "<<<REPLACE>>>":
-            self._patch_substate = "replace"
-            self._replace_acc = ""
-            return
-        if stripped == "<<<END>>>":
-            self.patches.append((self._find_acc, self._replace_acc))
-            self._find_acc = ""
-            self._replace_acc = ""
-            self._patch_substate = "body"
-            return
-        if self._patch_substate == "find":
-            self._find_acc += line
-        elif self._patch_substate == "replace":
-            self._replace_acc += line
 
 
 StreamParser = AgentStreamParser

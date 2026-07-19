@@ -175,6 +175,17 @@ export default function ChatView({
   // animation from a stale turn can detect it's been superseded and stop
   // touching shared state.
   const animationTokenRef = useRef(0);
+  // True once at least one `patch_applied` event has landed for the current
+  // turn — the agentic small-patch modify loop animates each step live as
+  // it arrives, so the single whole-file diff animation in onGenerationDone
+  // is only needed as a fallback for turns that never got incremental
+  // patches (brand-new generation, or a full-file safety-net regeneration).
+  const receivedPatchAppliedRef = useRef(false);
+  // Serializes per-patch diff animations so out-of-order network delivery
+  // (or a slow tick loop) can never animate two steps concurrently — each
+  // new patch_applied's animation is chained onto the promise for the one
+  // before it.
+  const patchAnimationChainRef = useRef<Promise<void>>(Promise.resolve());
 
   const [projectLoadStatus, setProjectLoadStatus] = useState<string | null>(
     null,
@@ -798,6 +809,58 @@ export default function ChatView({
       pendingRequestIdRef.current = null;
     };
 
+    // Agentic small-patch modify loop: the server emits one `patch_applied`
+    // per verified step, well before `generation_done`. Each one gets its
+    // own diff-typewriter animation (old shown code -> that step's updated
+    // full HTML), chained so steps always animate strictly in order even if
+    // the next patch_applied arrives before the previous animation finishes.
+    const onPatchApplied = (payload: {
+      request_id: string;
+      step: number;
+      html: string;
+    }) => {
+      if (payload.request_id !== pendingRequestIdRef.current) return;
+      if (typeof payload.html !== 'string') return;
+      clearGenerationWatchdog();
+      receivedPatchAppliedRef.current = true;
+
+      const myToken = animationTokenRef.current;
+      const targetHtml = payload.html;
+      const stillCurrent = () => animationTokenRef.current === myToken;
+
+      patchAnimationChainRef.current = patchAnimationChainRef.current
+        .then(async () => {
+          if (!stillCurrent()) return;
+
+          if (prefersReducedMotion()) {
+            htmlSourceRef.current = targetHtml;
+            setHtmlSource(targetHtml);
+            return;
+          }
+
+          const previousStickBottom = codeStickBottomRef.current;
+          codeStickBottomRef.current = false;
+          await animateHtmlDiff({
+            before: htmlSourceRef.current,
+            after: targetHtml,
+            isCancelled: () => !stillCurrent(),
+            onUpdate: (text) => {
+              // Update the ref synchronously (not just via the htmlSource
+              // effect) so the NEXT patch_applied — or the final
+              // reconciliation in onGenerationDone — always sees the true
+              // current buffer, even if React hasn't committed yet.
+              htmlSourceRef.current = text;
+              setHtmlSource(text);
+            },
+            onScrollToLine: scrollCodeToLine,
+          });
+          codeStickBottomRef.current = previousStickBottom;
+        })
+        .catch(() => {
+          /* never let one bad animation break the chain for later steps */
+        });
+    };
+
     const onGenerationDone = (payload: { request_id: string }) => {
       if (payload.request_id !== pendingRequestIdRef.current) return;
       if (!pendingAssistantIdRef.current) return;
@@ -807,6 +870,7 @@ export default function ChatView({
       const myToken = animationTokenRef.current;
       const wasModifyTurn = isModifyTurnRef.current;
       const preEditHtml = preEditHtmlRef.current;
+      const usedIncrementalPatches = receivedPatchAppliedRef.current;
 
       if (!wasModifyTurn) {
         // First-prompt behavior, unchanged: the file already streamed in
@@ -816,32 +880,64 @@ export default function ChatView({
       }
 
       void (async () => {
+        // Let any still-queued per-patch animations for this turn finish
+        // before reconciling with the server's persisted final state.
+        try {
+          await patchAnimationChainRef.current;
+        } catch {
+          /* individual step failures are already swallowed above */
+        }
+
         const data = await fetchProjectLoadData();
         if (!data || data === 'not-found') return;
 
         const finalHtml = typeof data.html === 'string' ? data.html : null;
         const stillCurrent = () => animationTokenRef.current === myToken;
+        // If per-patch animations already ran, the code panel is already at
+        // (or very near) the final state — animate from THERE, not from the
+        // original pre-turn snapshot. This also correctly handles the rare
+        // case where some steps patched successfully before the loop had to
+        // escalate to a full-file fallback: any remaining gap between what
+        // the patches produced and the fallback's final file still animates,
+        // instead of silently snapping.
+        const baseline = usedIncrementalPatches ? htmlSourceRef.current : preEditHtml;
         const shouldAnimate =
           wasModifyTurn &&
           finalHtml !== null &&
-          preEditHtml !== null &&
-          preEditHtml !== finalHtml &&
+          baseline !== null &&
+          baseline !== finalHtml &&
           !prefersReducedMotion() &&
           stillCurrent();
 
-        applyProjectLoad(data, { force: true, skipHtml: shouldAnimate });
+        applyProjectLoad(data, {
+          force: true,
+          skipHtml: shouldAnimate || (wasModifyTurn && usedIncrementalPatches),
+        });
 
-        if (shouldAnimate && finalHtml !== null) {
+        if (shouldAnimate && finalHtml !== null && baseline !== null) {
           const previousStickBottom = codeStickBottomRef.current;
           codeStickBottomRef.current = false;
           await animateHtmlDiff({
-            before: preEditHtml,
+            before: baseline,
             after: finalHtml,
             isCancelled: () => !stillCurrent(),
-            onUpdate: (text) => setHtmlSource(text),
+            onUpdate: (text) => {
+              htmlSourceRef.current = text;
+              setHtmlSource(text);
+            },
             onScrollToLine: scrollCodeToLine,
           });
           codeStickBottomRef.current = previousStickBottom;
+        } else if (
+          wasModifyTurn &&
+          usedIncrementalPatches &&
+          finalHtml !== null &&
+          stillCurrent()
+        ) {
+          // Baseline already matches finalHtml (the common case) — plain,
+          // no-op-looking sync so state is guaranteed consistent.
+          htmlSourceRef.current = finalHtml;
+          setHtmlSource(finalHtml);
         }
 
         if (wasModifyTurn && stillCurrent()) {
@@ -882,6 +978,7 @@ export default function ChatView({
     socket.on('thinking_chunk', onThinkingChunk);
     socket.on('message_chunk', onMessageChunk);
     socket.on('code_chunk', onCodeChunk);
+    socket.on('patch_applied', onPatchApplied);
     socket.on('assistant_reply', onAssistantReply);
     socket.on('generation_done', onGenerationDone);
     socket.on('generation_error', onGenerationError);
@@ -901,6 +998,7 @@ export default function ChatView({
       socket.off('thinking_chunk', onThinkingChunk);
       socket.off('message_chunk', onMessageChunk);
       socket.off('code_chunk', onCodeChunk);
+      socket.off('patch_applied', onPatchApplied);
       socket.off('assistant_reply', onAssistantReply);
       socket.off('generation_done', onGenerationDone);
       socket.off('generation_error', onGenerationError);
@@ -943,6 +1041,8 @@ export default function ChatView({
     animationTokenRef.current += 1;
     isModifyTurnRef.current = false;
     preEditHtmlRef.current = null;
+    receivedPatchAppliedRef.current = false;
+    patchAnimationChainRef.current = Promise.resolve();
     pendingAssistantIdRef.current = null;
     pendingRequestIdRef.current = null;
     // Clear all project-specific refs so stale data can never bleed into the new session.
@@ -1113,6 +1213,8 @@ export default function ChatView({
       animationTokenRef.current += 1;
       isModifyTurnRef.current = htmlSourceRef.current.trim().length > 0;
       preEditHtmlRef.current = htmlSourceRef.current;
+      receivedPatchAppliedRef.current = false;
+      patchAnimationChainRef.current = Promise.resolve();
       // Let this turn's first preview update land immediately rather than
       // inheriting the throttle window from whatever the last turn did.
       lastPreviewFlushAtRef.current = 0;

@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 import httpx
+from diff_match_patch import diff_match_patch as _DiffMatchPatch
 
 try:
     from dotenv import load_dotenv
@@ -44,10 +45,12 @@ from ai_service import AIAllFailedError, AINoKeysError, AIService
 from xml_response_parser import (
     AgentStreamParser,
     ContinuationStreamParser,
-    ModifyStreamParser,
+    PatchStepStreamParser,
     REPAIR_PROMPT,
     parse_agent_response,
+    parse_patch_step_response,
     validate_agent_response,
+    validate_patch_step_response,
 )
 from pocketbase_save import (
     create_message_with_client,
@@ -88,6 +91,7 @@ def _load_prompt(filename: str) -> str:
 
 AGENT_PROMPT: str = _load_prompt("Agent Prompt.txt")
 MODIFY_PROMPT: str = _load_prompt("Modify Prompt.txt")
+MODIFY_FALLBACK_PROMPT: str = _load_prompt("Modify Fallback Prompt.txt")
 OPTIMIZER_PROMPT: str = _load_prompt("Prompt Optimizer.txt")
 
 # Injected as the system prompt for continuation calls (resuming cut-off HTML).
@@ -100,6 +104,14 @@ CONTINUATION_SYSTEM = (
 )
 
 MAX_CONTINUATION_ATTEMPTS = 3
+
+# Agentic small-patch modify loop: each step is one small AI call + patch
+# application. MAX_AGENTIC_STEPS bounds how many small edits one turn can
+# make; MAX_STEP_RETRIES bounds how many times a *single* step is retried
+# (with failure feedback to the model) before the whole turn escalates to
+# the full-file regeneration safety net.
+MAX_AGENTIC_STEPS: int = int(os.environ.get("MODIFY_MAX_STEPS", "12"))
+MAX_STEP_RETRIES: int = int(os.environ.get("MODIFY_MAX_STEP_RETRIES", "3"))
 
 # ---------------------------------------------------------------------------
 # AI service (lazy-loaded singleton)
@@ -907,88 +919,36 @@ async def _maybe_repair_agent_response(
     return None
 
 
-# How many Modify-prompt patch iterations to allow in "patch mode".
-# Overridable via env var so deployments can tune cost/quality.
-MAX_PATCH_ITERATIONS = max(1, int(os.environ.get("MAX_PATCH_ITERATIONS", "5")))
-
-# ---------------------------------------------------------------------------
-# Patch matching (FIND/REPLACE application for the Modify flow)
-# ---------------------------------------------------------------------------
-#
-# The model is asked to copy FIND text "verbatim" from the current HTML, but
-# LLMs frequently introduce tiny formatting drift (whitespace, indentation,
-# line endings) when reproducing large chunks of text. A plain `str in html`
-# check is too brittle (bug: silently drops the patch) and a plain
-# `str.replace(..., 1)` is too loose (bug: can patch the wrong occurrence
-# when the snippet isn't unique). The helpers below apply a patch only when
-# it can be located *unambiguously*, and report *why* it failed otherwise so
-# the caller can retry with feedback instead of silently giving up.
-
-PatchFailReason = str  # "not_found" | "ambiguous"
-
-
-def _whitespace_tolerant_pattern(text: str) -> str:
-    """Build a regex matching *text* verbatim except runs of whitespace,
-    which become ``\\s+`` so incidental reflowing/indentation/line-ending
-    drift doesn't break the match while non-whitespace content must still
-    match exactly."""
-    parts = re.split(r"(\s+)", text)
-    out: list[str] = []
-    for part in parts:
-        if not part:
-            continue
-        out.append(r"\s+" if part.isspace() else re.escape(part))
-    return "".join(out)
-
-
-def _locate_patch_span(html: str, find_text: str) -> tuple[int, int] | PatchFailReason:
-    """Find the unique span of *find_text* in *html*.
-
-    Returns ``(start, end)`` on a single unambiguous match, or the string
-    ``"not_found"`` / ``"ambiguous"`` describing why no patch can be applied.
-    """
-    if not find_text:
-        return "not_found"
-
-    # Tier 1: exact substring match — but only if it's unique. Applying a
-    # non-unique FIND to "the first occurrence" risks silently editing the
-    # wrong spot on the page.
-    count = html.count(find_text)
-    if count == 1:
-        start = html.index(find_text)
-        return (start, start + len(find_text))
-    if count > 1:
-        return "ambiguous"
-
-    # Tier 2: whitespace-tolerant regex — tolerates line-ending differences
-    # and incidental reflowing while still requiring real content to match.
-    pattern = _whitespace_tolerant_pattern(find_text)
+async def _maybe_repair_patch_step_response(
+    service: AIService, response: str, pb: PocketBase
+) -> str | None:
+    """Ask a cheap model to restore XML tags on a malformed patch-step
+    response, without touching the FIND/REPLACE/file content."""
     try:
-        matches = list(re.finditer(pattern, html, flags=re.DOTALL))
-    except re.error:
-        matches = []
-    if len(matches) == 1:
-        m = matches[0]
-        return (m.start(), m.end())
-    if len(matches) > 1:
-        return "ambiguous"
+        parsed = parse_patch_step_response(response)
+        validate_patch_step_response(parsed)
+        return None
+    except ValueError:
+        pass
 
-    return "not_found"
+    if not await AIService.fetch_keys_for_type(pb, "Optimizer"):
+        logger.debug("ws_app: patch-step repair skipped — no Optimizer keys configured")
+        return None
 
-
-def _apply_patch(
-    html: str, find_text: str, replace_text: str
-) -> tuple[str, bool, str]:
-    """Attempt to apply one FIND/REPLACE patch to *html*.
-
-    Returns ``(new_html, success, reason)``. On failure ``new_html is html``
-    (unchanged) and ``reason`` is ``"not_found"`` or ``"ambiguous"``.
-    """
-    result = _locate_patch_span(html, find_text)
-    if isinstance(result, str):
-        return html, False, result
-    start, end = result
-    return html[:start] + replace_text + html[end:], True, "ok"
+    try:
+        repaired = await service.complete(
+            [{"role": "user", "content": REPAIR_PROMPT.format(response=response)}],
+            "Optimizer",
+            pb,
+            max_tokens=16384,
+        )
+        repaired = repaired.strip()
+        if repaired:
+            logger.info("ws_app: attempted patch-step response tag repair")
+            return repaired
+    except Exception:
+        logger.warning("ws_app: patch-step response repair failed", exc_info=True)
+    return None
 
 
 class _AssistantVisibleMessageNormalizer:
@@ -1042,6 +1002,168 @@ class _AssistantVisibleMessageNormalizer:
 
 
 # ---------------------------------------------------------------------------
+# Patch matching — tiered, from strictest/safest to fuzziest
+# ---------------------------------------------------------------------------
+#
+# 1. Exact substring match (unique)         — zero risk, deterministic.
+# 2. Whitespace-tolerant match (unique)     — handles indentation/line-ending
+#    drift while still splicing in an exact, unmodified span.
+# 3. Anchored fuzzy match (diff-match-patch) — last resort for minor content
+#    drift (a changed/misremembered character), bounded to a small search
+#    window for speed and gated by a strict post-apply verification so an
+#    unreliable fuzzy match is rejected rather than risking corruption.
+#
+# Tier 3 deliberately does NOT try to be maximally fuzzy: testing showed that
+# widening diff-match-patch's search distance to be location-independent is
+# both catastrophically slow on realistic documents and, worse, can silently
+# corrupt content when the "old" text it thinks it's replacing doesn't quite
+# match reality (e.g. duplicating characters). Tiers 1-2 already handle the
+# overwhelming majority of real drift (whitespace) with zero corruption risk;
+# tier 3 only needs to catch the rare remaining case, so it can afford to be
+# conservative and simply fail (triggering a retry) when unsure.
+
+_WS_RUN_RE = re.compile(r"\s+")
+
+_ANCHOR_LEAD_MARGIN = 24
+_ANCHOR_TRAIL_MARGIN = 400
+_ANCHOR_MIN_LINE_LEN = 6
+
+
+def _whitespace_tolerant_pattern(find_text: str) -> re.Pattern[str]:
+    """Build a regex matching *find_text* while tolerating differences in
+    *runs* of whitespace — the single most common way an AI's "verbatim"
+    copy of a FIND block drifts from the real source (re-indentation,
+    CRLF/LF, extra or missing blank lines)."""
+    parts = [p for p in _WS_RUN_RE.split(find_text) if p != ""]
+    if not parts:
+        return re.compile(re.escape(find_text))
+    return re.compile(r"\s+".join(re.escape(p) for p in parts), re.DOTALL)
+
+
+def _locate_span(html: str, find_text: str) -> tuple[int, int] | str:
+    """Locate the ``(start, end)`` span of *find_text* inside *html*.
+
+    Returns the span on a confident, unique match, or ``"ambiguous"`` /
+    ``"not_found"`` when it can't be trusted.
+    """
+    if not find_text.strip():
+        return "not_found"
+
+    count = html.count(find_text)
+    if count == 1:
+        start = html.index(find_text)
+        return start, start + len(find_text)
+    if count > 1:
+        return "ambiguous"
+
+    try:
+        matches = list(_whitespace_tolerant_pattern(find_text).finditer(html))
+    except re.error:
+        matches = []
+    if len(matches) == 1:
+        return matches[0].start(), matches[0].end()
+    if len(matches) > 1:
+        return "ambiguous"
+
+    return "not_found"
+
+
+def _find_anchor_offset(html: str, find_text: str) -> tuple[int, int] | None:
+    """Cheaply estimate where *find_text* should start inside *html* even
+    though it isn't present verbatim.
+
+    Used to bound the fuzzy search window below to a small region — locating
+    an anchor via plain substring search keeps the fuzzy match fast and safe
+    on large documents, instead of a distance-unbounded Bitap scan (which
+    testing showed can take 60+ seconds on an 8KB document).
+
+    Returns ``(offset_in_html, offset_in_find_text)`` for the same anchor
+    text, or ``None`` if nothing in *find_text* can be uniquely located.
+    """
+    lines = [ln for ln in find_text.splitlines() if ln.strip()]
+    lines.sort(key=lambda ln: -len(ln.strip()))
+    for ln in lines:
+        stripped = ln.strip()
+        if len(stripped) < _ANCHOR_MIN_LINE_LEN:
+            continue
+        if html.count(stripped) == 1:
+            html_off = html.index(stripped)
+            ft_off = find_text.index(ln) + ln.index(stripped)
+            return html_off, ft_off
+    for n in (80, 60, 40, 25):
+        prefix = find_text[:n].strip()
+        if len(prefix) >= 10 and html.count(prefix) == 1:
+            return html.index(prefix), find_text.index(prefix)
+    return None
+
+
+def _apply_patch_fuzzy(html: str, find_text: str, replace_text: str) -> tuple[str, bool, str]:
+    """Tier-3 fuzzy patch application. See module note above for rationale."""
+    anchor = _find_anchor_offset(html, find_text)
+    if anchor is None:
+        return html, False, "not_found"
+    html_off, ft_off = anchor
+    expected_start = html_off - ft_off
+
+    win_start = max(0, expected_start - _ANCHOR_LEAD_MARGIN)
+    win_end = min(len(html), expected_start + len(find_text) + _ANCHOR_TRAIL_MARGIN)
+    window = html[win_start:win_end]
+
+    dmp = _DiffMatchPatch()
+    dmp.Match_Threshold = 0.2
+    dmp.Match_Distance = 1000
+    dmp.Patch_Margin = 8
+
+    try:
+        patches = dmp.patch_make(find_text, replace_text)
+        new_window, results = dmp.patch_apply(patches, window)
+    except Exception:
+        logger.warning("ws_app: fuzzy patch_apply raised", exc_info=True)
+        return html, False, "not_found"
+
+    if not results or not all(results):
+        return html, False, "not_found"
+    if replace_text.strip() and replace_text.strip() not in new_window:
+        return html, False, "unverified"
+
+    return html[:win_start] + new_window + html[win_end:], True, "ok"
+
+
+def _apply_one_patch(html: str, find_text: str, replace_text: str) -> tuple[str, bool, str]:
+    """Apply a single FIND/REPLACE block using the tiered matcher above."""
+    find_norm = find_text.strip("\r\n")
+    replace_norm = replace_text.strip("\r\n")
+    if not find_norm.strip():
+        return html, False, "empty_find"
+
+    located = _locate_span(html, find_norm)
+    if isinstance(located, tuple):
+        start, end = located
+        return html[:start] + replace_norm + html[end:], True, "ok"
+    if located == "ambiguous":
+        return html, False, "ambiguous"
+
+    return _apply_patch_fuzzy(html, find_norm, replace_norm)
+
+
+def _apply_patch_group(
+    html: str, patches: list[tuple[str, str]]
+) -> tuple[str, bool, str, str]:
+    """Apply every FIND/REPLACE block of one step, in order, each chained
+    onto the result of the previous one.
+
+    Returns ``(new_html, success, reason, failing_find_text)``. On failure,
+    *html* is returned unchanged (no partial application).
+    """
+    current = html
+    for find_text, replace_text in patches:
+        current, ok, reason = _apply_one_patch(current, find_text, replace_text)
+        if not ok:
+            return html, False, reason, find_text
+    return current, True, "ok", ""
+
+
+# ---------------------------------------------------------------------------
 # AI generation (full + patch modes)
 # ---------------------------------------------------------------------------
 
@@ -1066,10 +1188,16 @@ async def _run_ai_generation(
     """Drive real AI streaming; returns the full visible message text.
 
     * No existing HTML  → full generation (Agent Prompt).
-      Streams thinking_chunk / message_chunk / code_chunk live.
-    * Existing HTML     → patch loop (Modify Prompt, up to MAX_PATCH_ITERATIONS).
-      Streams thinking_chunk / message_chunk live; streams patched HTML as
-      code_chunks at the end of each iteration.
+    * Existing HTML     → full-file edit (Modify Prompt): the model is given
+      the current file as context and asked to return the complete updated
+      file, the same reliable mechanism as brand-new generation. This
+      replaced an earlier FIND/REPLACE patch mechanism that was prone to
+      silent failures whenever the model's "verbatim" copy of the FIND text
+      drifted by even a stray whitespace character.
+
+    Both branches stream thinking_chunk / message_chunk / code_chunk live
+    and transparently resume via the continuation mechanism if the model's
+    output is cut off mid-file.
     """
 
     # ── Shared emit helpers ────────────────────────────────────────────────
@@ -1197,15 +1325,26 @@ async def _run_ai_generation(
         parts: list[dict] = [{"type": "text", "text": full_text}] + image_blocks
         return {"role": "user", "content": parts}
 
-    # ── Branch A: full generation ──────────────────────────────────────────
-    if not is_modification:
+    async def _stream_full_file(system_prompt: str, chat_messages: list[dict]) -> bool:
+        """Stream one plan/message/file/footer/status response and
+        transparently resume via continuation if it's cut off mid-file.
+
+        Shared by both branches below — full-file generation (brand-new
+        project) and full-file editing (modification) differ only in the
+        system prompt and in whether the current HTML is included in the
+        user message, so they can safely share one streaming+continuation
+        implementation instead of maintaining two parallel ones.
+
+        Returns True if the file was completed (closed with ``</file>`` and
+        ``<status>DONE</status>``), False if every continuation attempt was
+        exhausted while still cut off.
+        """
         parser = AgentStreamParser()
         raw_response_acc = [""]
-        chat_messages = history + [_make_user_message(prompt)]
 
         try:
             async for ai_chunk in service.complete_stream(
-                chat_messages, "Agent", pb_ai, system=AGENT_PROMPT
+                chat_messages, "Agent", pb_ai, system=system_prompt
             ):
                 t, content = ai_chunk["type"], ai_chunk["content"]
                 if t == "model":
@@ -1252,7 +1391,7 @@ async def _run_ai_generation(
                         await _emit_message("\n" + structured.footer)
                     parser.is_done = structured.status == "DONE"
                 except ValueError:
-                    logger.warning("ws_app: repaired agent response still invalid")
+                    logger.warning("ws_app: repaired response still invalid")
 
         # ── Continuation: resume if the HTML was cut off mid-generation ──────
         generation_complete = parser.is_done
@@ -1275,29 +1414,23 @@ async def _run_ai_generation(
                 f"(attempt {cont_attempt}/{MAX_CONTINUATION_ATTEMPTS})...]\n"
             )
 
-            cont_messages = (
-                history
-                + [_make_user_message(prompt)]
-                + [
-                    {
-                        "role": "assistant",
-                        "content": (
-                            f'<file name="index.html">\n{partial_html}'
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your previous response was cut off before the HTML was "
-                            "complete. Please CONTINUE the HTML from exactly where you "
-                            "stopped. Output ONLY the remaining HTML — do NOT repeat "
-                            "anything already written and do NOT reopen <file>. "
-                            "When finished, close with </file> then "
-                            "<status>DONE</status>."
-                        ),
-                    },
-                ]
-            )
+            cont_messages = chat_messages + [
+                {
+                    "role": "assistant",
+                    "content": f'<file name="index.html">\n{partial_html}',
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous response was cut off before the HTML was "
+                        "complete. Please CONTINUE the HTML from exactly where you "
+                        "stopped. Output ONLY the remaining HTML — do NOT repeat "
+                        "anything already written and do NOT reopen <file>. "
+                        "When finished, close with </file> then "
+                        "<status>DONE</status>."
+                    ),
+                },
+            ]
 
             cont_parser = ContinuationStreamParser()
             try:
@@ -1336,242 +1469,258 @@ async def _run_ai_generation(
                 )
                 break
 
+        return generation_complete
+
+    async def _run_patch_step_loop() -> bool:
+        """Agentic small-patch loop for modifying an existing file.
+
+        Calls the model repeatedly; each response is ONE small step
+        containing either a ``<patch>`` (FIND/REPLACE blocks, applied via
+        the tiered matcher above) or, as an escape hatch, a full ``<file>``
+        rewrite for just that step. Emits ``patch_applied`` after each
+        successfully-applied step so the frontend can animate that specific
+        change live, instead of waiting for the whole turn to finish.
+
+        Returns True once the model reports ``<status>DONE</status>`` (or
+        the step budget is exhausted after making at least some verified
+        progress). Returns False only when a step's patch/file repeatedly
+        fails to apply even after feedback-guided retries — the caller
+        should then fall back to a full-file regeneration for the turn.
+        """
+        current_html = html_acc_holder["val"] or existing_html
+        completed_summaries: list[str] = []
+        step_index = 0
+        retries_this_step = 0
+        extra_feedback = ""
+
+        while step_index < MAX_AGENTIC_STEPS:
+            if step_index == 0:
+                recap = ""
+            else:
+                done_list = "\n".join(f"- {s}" for s in completed_summaries)
+                recap = (
+                    f"\n\nSteps already completed in this request:\n{done_list}\n\n"
+                    "Continue with the NEXT small step. If every requested "
+                    "change has now been made, respond with "
+                    "<status>DONE</status> instead of another patch."
+                )
+            user_content_text = (
+                f"Current page HTML:\n```html\n{current_html}\n```\n\n"
+                f"User request: {prompt}{recap}{extra_feedback}"
+            )
+            call_user_msg = _make_user_message(user_content_text)
+            chat_messages = (
+                (history + [call_user_msg]) if step_index == 0 else [call_user_msg]
+            )
+            extra_feedback = ""
+
+            parser = PatchStepStreamParser()
+            raw_response_acc = [""]
+            # PatchStepStreamParser emits <message> AND <footer> content as
+            # the same "message" segment type (both are simple visible-text
+            # sections) — accumulate this step's share locally, in addition
+            # to live-streaming it via _emit_message, so we have a per-step
+            # summary for the "already completed" recap on later steps.
+            step_message_acc = [""]
+
+            try:
+                async for ai_chunk in service.complete_stream(
+                    chat_messages, "Agent", pb_ai, system=MODIFY_PROMPT
+                ):
+                    t, content = ai_chunk["type"], ai_chunk["content"]
+                    if t == "model":
+                        logger.info(
+                            "ws_app: modify step %d generating with %s",
+                            step_index, content,
+                        )
+                    elif t == "thinking":
+                        await _emit_thinking(content)
+                    elif t == "text":
+                        raw_response_acc[0] += content
+                        for seg_type, seg_content in parser.feed(content):
+                            if seg_type == "thinking":
+                                await _emit_thinking(seg_content)
+                            elif seg_type == "message":
+                                step_message_acc[0] += seg_content
+                                await _emit_message(seg_content)
+                            # "code" (the <file> escape hatch) is intentionally
+                            # NOT streamed live here — it's only surfaced once
+                            # complete, via patch_applied below, so a half
+                            # written full-file rewrite never flashes into the
+                            # code panel during what's meant to be a small step.
+
+                for seg_type, seg_content in parser.flush():
+                    if seg_type == "thinking":
+                        await _emit_thinking(seg_content)
+                    elif seg_type == "message":
+                        step_message_acc[0] += seg_content
+                        await _emit_message(seg_content)
+
+            except (AINoKeysError, AIAllFailedError) as exc:
+                raise RuntimeError(str(exc)) from exc
+
+            patches = parser.patches
+            step_full_html = parser.full_html
+            status = "DONE" if parser.is_done else ("CONTINUE" if parser.wants_continuation else "")
+            step_message = step_message_acc[0]
+
+            if not patches and not step_full_html.strip() and not status:
+                repaired = await _maybe_repair_patch_step_response(
+                    service, raw_response_acc[0], pb_ai
+                )
+                if repaired:
+                    try:
+                        reparsed = parse_patch_step_response(repaired)
+                        validate_patch_step_response(reparsed)
+                        patches = reparsed.patches
+                        step_full_html = reparsed.file.get("content", "")
+                        status = reparsed.status
+                        if not step_message.strip():
+                            combined = " ".join(
+                                s for s in (reparsed.message, reparsed.footer) if s
+                            )
+                            if combined:
+                                step_message = combined
+                                await _emit_message(combined)
+                    except ValueError:
+                        logger.warning("ws_app: repaired patch-step response still invalid")
+
+            if not patches and not step_full_html.strip():
+                retries_this_step += 1
+                logger.warning(
+                    "ws_app: modify step %d produced neither patch nor file "
+                    "(retry %d/%d)",
+                    step_index, retries_this_step, MAX_STEP_RETRIES,
+                )
+                if retries_this_step > MAX_STEP_RETRIES:
+                    return False
+                extra_feedback = (
+                    "\n\nYour previous response did not include a valid "
+                    "<patch> or <file> block. Please resend this step with one."
+                )
+                continue
+
+            if step_full_html.strip():
+                new_html = step_full_html
+                apply_ok, fail_reason, failing_find = True, "", ""
+            else:
+                new_html, apply_ok, fail_reason, failing_find = _apply_patch_group(
+                    current_html, patches
+                )
+
+            if not apply_ok:
+                retries_this_step += 1
+                logger.warning(
+                    "ws_app: modify step %d patch application failed "
+                    "reason=%s (retry %d/%d)",
+                    step_index, fail_reason, retries_this_step, MAX_STEP_RETRIES,
+                )
+                if retries_this_step > MAX_STEP_RETRIES:
+                    return False
+                reason_hint = {
+                    "ambiguous": (
+                        "That FIND text matches multiple locations in the "
+                        "current HTML. Add a few more surrounding lines so it "
+                        "uniquely identifies one spot."
+                    ),
+                    "not_found": (
+                        "That FIND text could not be located in the current "
+                        "HTML. Copy it again exactly (verbatim, including "
+                        "whitespace) from the HTML shown above."
+                    ),
+                    "unverified": (
+                        "That patch could not be applied with full "
+                        "confidence. Copy the FIND text again exactly from "
+                        "the current HTML shown above."
+                    ),
+                    "empty_find": "The FIND text was empty. Provide the exact text to find.",
+                }.get(fail_reason, "That patch could not be applied. Please try again.")
+                extra_feedback = (
+                    f"\n\nYour last step's patch failed to apply "
+                    f"(FIND text started with: {failing_find.strip()[:200]!r}). "
+                    f"{reason_hint}"
+                )
+                continue
+
+            # ── Success — commit this step's change ─────────────────────
+            retries_this_step = 0
+            current_html = new_html
+            html_acc_holder["val"] = current_html
+            if project_id and project_id in _active_generations:
+                _active_generations[project_id]["html_acc"] = current_html
+
+            summary = step_message.strip() or "Applied a change."
+            completed_summaries.append(summary)
+            step_index += 1
+
+            await sio.emit(
+                "patch_applied",
+                {"request_id": request_id, "step": step_index, "html": current_html},
+                room=emit_target,
+            )
+            if project_id and pb:
+                await patch_project_record_with_client(
+                    pb, project_id, html=current_html, status="generating"
+                )
+
+            if status != "CONTINUE":
+                # DONE, or no explicit status after a successfully-applied
+                # step — stop rather than loop indefinitely on ambiguity.
+                return True
+
+        logger.warning(
+            "ws_app: modify loop hit MAX_AGENTIC_STEPS=%d while still "
+            "CONTINUE — stopping with the progress made so far",
+            MAX_AGENTIC_STEPS,
+        )
+        return True
+
+    # ── Branch A: full generation (brand-new project) ─────────────────────
+    if not is_modification:
+        chat_messages = history + [_make_user_message(prompt)]
+        await _stream_full_file(AGENT_PROMPT, chat_messages)
+
         _msg_nl.finish()
         reply = _message_acc[0].strip("\r\n")
         return reply or "Done! Let me know if you'd like any changes."
 
-    # ── Branch B: patch loop (modification) ───────────────────────────────
+    # ── Branch B: agentic small-patch loop (modification) ──────────────────
     #
-    # Retries are driven by *unresolved patch failures*, not by the AI's
-    # self-reported <status> — the Modify Prompt forces status=DONE on every
-    # response, so relying on a CONTINUE status would never actually loop.
-    # When a FIND block can't be located unambiguously, the next iteration
-    # tells the model exactly which blocks failed (and why) and asks it to
-    # resend just those with corrected FIND text against the updated HTML.
+    # Each AI call returns exactly one small patch (or, rarely, a full-file
+    # escape hatch for that step) which is applied and shown live before the
+    # next call is made. If patch application keeps failing even after
+    # feedback-guided retries, fall back to one full-file regeneration for
+    # the turn — never leave the file partially/incorrectly edited.
+    patch_loop_ok = await _run_patch_step_loop()
 
-    async def _continue_truncated_modify_file(
-        base_messages: list[dict], trigger_user_msg: dict, partial_html: str
-    ) -> tuple[str, bool]:
-        """Resume a ``<file>`` fallback that was cut off mid-stream.
-
-        Mirrors the Agent branch's continuation mechanism so a truncated
-        full-file regeneration during a modify turn completes instead of
-        silently no-op'ing (the parser never sees ``</file>`` so its
-        ``full_html`` would otherwise stay empty).
-        """
-        html_acc = partial_html
-        completed = False
-        for attempt in range(1, MAX_CONTINUATION_ATTEMPTS + 1):
-            await _emit_thinking(
-                f"\n[Full-file regeneration cut off — continuing "
-                f"(attempt {attempt}/{MAX_CONTINUATION_ATTEMPTS})...]\n"
-            )
-            cont_messages = base_messages + [
-                trigger_user_msg,
-                {
-                    "role": "assistant",
-                    "content": f'<file name="index.html">\n{html_acc}',
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Your previous response was cut off before the HTML was "
-                        "complete. Please CONTINUE the HTML from exactly where you "
-                        "stopped. Output ONLY the remaining HTML — do NOT repeat "
-                        "anything already written and do NOT reopen <file>. "
-                        "When finished, close with </file> then <status>DONE</status>."
-                    ),
-                },
-            ]
-            cont_parser = ContinuationStreamParser()
-            try:
-                async for ai_chunk in service.complete_stream(
-                    cont_messages, "Agent", pb_ai, system=CONTINUATION_SYSTEM
-                ):
-                    t, content = ai_chunk["type"], ai_chunk["content"]
-                    if t == "thinking":
-                        await _emit_thinking(content)
-                    elif t == "text":
-                        for seg_type, seg_content in cont_parser.feed(content):
-                            if seg_type == "thinking":
-                                await _emit_thinking(seg_content)
-                            elif seg_type == "code":
-                                html_acc += seg_content
-                for seg_type, seg_content in cont_parser.flush():
-                    if seg_type == "code":
-                        html_acc += seg_content
-            except (AINoKeysError, AIAllFailedError):
-                logger.warning(
-                    "ws_app: modify file-fallback continuation exhausted models "
-                    "on attempt %d/%d", attempt, MAX_CONTINUATION_ATTEMPTS,
-                )
-                break
-
-            if cont_parser.is_done:
-                completed = True
-                break
-
-        return html_acc, completed
-
-    current_html = existing_html
-    iter_messages = list(history)
-    # (find_text, replace_text, reason) for patches unresolved by the most
-    # recent iteration — drives whether/how the loop retries.
-    unresolved: list[tuple[str, str, str]] = []
-    total_patches_seen = 0
-    total_patches_applied = 0
-    used_file_fallback = False
-    file_fallback_continued = False
-
-    for iteration in range(MAX_PATCH_ITERATIONS):
-        if iteration == 0:
-            user_content_text = (
-                f"Current page HTML:\n```html\n{current_html}\n```\n\n"
-                f"User request: {prompt}"
-            )
-            # First iteration may include image attachments (screenshot / mockup).
-            call_user_msg = _make_user_message(user_content_text)
-        else:
-            failed_blocks_text = "\n\n".join(
-                f"<<<FIND>>>\n{find_text}\n<<<REPLACE>>>\n{replace_text}\n<<<END>>>"
-                for find_text, replace_text, _ in unresolved
-            )
-            reasons = {reason for _, _, reason in unresolved}
-            if reasons == {"ambiguous"}:
-                reason_hint = "matched more than one location (ambiguous)"
-            elif reasons == {"not_found"}:
-                reason_hint = "was not found verbatim"
-            else:
-                reason_hint = "was not found verbatim, or matched more than once"
-            user_content_text = (
-                f"Updated HTML after your patches:\n```html\n{current_html}\n```\n\n"
-                f"The following {len(unresolved)} patch block(s) {reason_hint} in the "
-                "HTML above and were NOT applied:\n\n"
-                f"{failed_blocks_text}\n\n"
-                "Re-emit ONLY these blocks inside a <patch> tag, with FIND text copied "
-                "EXACTLY (character-for-character, including whitespace) from the "
-                "Updated HTML shown above. If a block was ambiguous, include more "
-                "surrounding context in FIND so it matches only one location. If a "
-                "requested change no longer applies, omit that block."
-            )
-            # Continuation turns are text-only — images were already sent in iter 0.
-            call_user_msg = {"role": "user", "content": user_content_text}
-
-        call_messages = iter_messages + [call_user_msg]
-        parser = ModifyStreamParser()
-        _msg_len_before_iter = len(_message_acc[0])
-
-        try:
-            async for ai_chunk in service.complete_stream(
-                call_messages, "Agent", pb_ai, system=MODIFY_PROMPT
-            ):
-                t, content = ai_chunk["type"], ai_chunk["content"]
-                if t == "model":
-                    logger.info(
-                        "ws_app: modifying with %s (iter %d/%d)",
-                        content, iteration + 1, MAX_PATCH_ITERATIONS,
-                    )
-                elif t == "thinking":
-                    await _emit_thinking(content)
-                elif t == "text":
-                    for seg_type, seg_content in parser.feed(content):
-                        if seg_type == "thinking":
-                            await _emit_thinking(seg_content)
-                        elif seg_type == "message":
-                            await _emit_message(seg_content)
-
-            for seg_type, seg_content in parser.flush():
-                if seg_type == "thinking":
-                    await _emit_thinking(seg_content)
-                elif seg_type == "message":
-                    await _emit_message(seg_content)
-
-        except (AINoKeysError, AIAllFailedError) as exc:
-            raise RuntimeError(str(exc)) from exc
-
-        # Cut-off <file> fallback: the model tried to regenerate the whole
-        # file but the response was truncated before </file>. Resume it
-        # instead of silently discarding the partial content.
-        if parser.in_file and parser.partial_file_content and not parser.full_html:
-            logger.info(
-                "ws_app: iteration %d — full-file fallback cut off at %d chars, "
-                "resuming via continuation", iteration + 1, len(parser.partial_file_content),
-            )
-            current_html, file_fallback_continued = await _continue_truncated_modify_file(
-                iter_messages, call_user_msg, parser.partial_file_content
-            )
-            used_file_fallback = True
-            unresolved = []
-            break
-
-        # Fallback: if the model ignored the patch format and returned a full
-        # HTML block instead, use that directly (avoids returning unchanged HTML).
-        if not parser.patches and parser.full_html:
-            logger.info(
-                "ws_app: iteration %d — model returned full HTML instead of "
-                "patches (%d chars); using it directly",
-                iteration + 1, len(parser.full_html),
-            )
-            current_html = parser.full_html
-            used_file_fallback = True
-            unresolved = []
-        else:
-            new_unresolved: list[tuple[str, str, str]] = []
-            applied_this_round = 0
-            for find_text, replace_text in parser.patches:
-                if not find_text:
-                    continue
-                total_patches_seen += 1
-                current_html, ok, reason = _apply_patch(current_html, find_text, replace_text)
-                if ok:
-                    applied_this_round += 1
-                    total_patches_applied += 1
-                else:
-                    new_unresolved.append((find_text, replace_text, reason))
-                    logger.warning(
-                        "ws_app: patch %s (iter %d/%d): %.80r…",
-                        reason, iteration + 1, MAX_PATCH_ITERATIONS, find_text,
-                    )
-            logger.info(
-                "ws_app: iteration %d — applied %d/%d patch(es), %d unresolved",
-                iteration + 1, applied_this_round, len(parser.patches), len(new_unresolved),
-            )
-            unresolved = new_unresolved
-
-        if not unresolved:
-            break
-        if iteration == MAX_PATCH_ITERATIONS - 1:
-            break  # out of retries — remaining `unresolved` reported below
-
-        # Retry: give the AI the updated HTML plus exactly which blocks failed.
-        this_iter_message = _message_acc[0][_msg_len_before_iter:]
-        iter_messages.append(call_user_msg)
-        iter_messages.append(
-            {"role": "assistant", "content": this_iter_message or "(no visible message)"}
+    if not patch_loop_ok:
+        logger.warning(
+            "ws_app: modify request_id=%s patch loop escalated to full-file "
+            "fallback", request_id,
         )
-
-    logger.info(
-        "ws_app: modify request_id=%s summary: patches_seen=%d patches_applied=%d "
-        "unresolved=%d file_fallback=%s file_fallback_continued=%s",
-        request_id, total_patches_seen, total_patches_applied, len(unresolved),
-        used_file_fallback, file_fallback_continued,
-    )
-
-    # Stream the final patched HTML to client as code_chunks
-    html_acc_holder["val"] = ""
-    since_html_holder["val"] = 0
-    STREAM_STEP = 40
-    for i in range(0, len(current_html), STREAM_STEP):
-        await _emit_code(current_html[i : i + STREAM_STEP])
-        await asyncio.sleep(0.003)
-
-    if unresolved:
-        count = len(unresolved)
-        await _emit_message(
-            f"\n\n⚠️ {count} change{'s' if count != 1 else ''} could not be applied "
-            "automatically. Try rephrasing the request or describing the change in "
-            "smaller steps."
+        await _emit_thinking(
+            "\n[Small-patch editing could not apply cleanly — regenerating "
+            "the full file as a safety net...]\n"
         )
+        fallback_user_text = (
+            f"Current page HTML:\n```html\n{html_acc_holder['val'] or existing_html}\n```\n\n"
+            f"User request: {prompt}"
+        )
+        fallback_messages = history + [_make_user_message(fallback_user_text)]
+        completed = await _stream_full_file(MODIFY_FALLBACK_PROMPT, fallback_messages)
+        new_html = html_acc_holder["val"]
+
+        if not completed or not new_html.strip():
+            logger.warning(
+                "ws_app: modify request_id=%s fallback did not complete a "
+                "full file (completed=%s, len=%d) — keeping last-known-good HTML",
+                request_id, completed, len(new_html),
+            )
+            html_acc_holder["val"] = new_html.strip() or existing_html
+            await _emit_message(
+                "\n\n⚠️ I couldn't complete that change. Please try again or "
+                "rephrase your request."
+            )
 
     _msg_nl.finish()
     reply = _message_acc[0].strip("\r\n")
